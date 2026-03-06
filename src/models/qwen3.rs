@@ -12,6 +12,7 @@ use candle_core::quantized::{gguf_file, QMatMul};
 use candle_nn::{linear, linear_no_bias, Activation, Linear, Module, VarBuilder};
 use image::{imageops::FilterType, DynamicImage};
 use serde::Deserialize;
+use unicode_categories::UnicodeCategories;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -402,6 +403,24 @@ fn build_vl_prompt(text: Option<&str>, include_image: bool, instruction: &str) -
     }
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
     prompt
+}
+
+fn prepare_instruction(instruction: Option<&str>, default_instruction: &str) -> String {
+    if let Some(inst) = instruction {
+        let trimmed = inst.trim();
+        if !trimmed.is_empty() {
+            let mut result = trimmed.to_string();
+
+            if let Some(last_char) = result.chars().last() {
+                if !last_char.is_punctuation() {
+                    result.push('.');
+                }
+            }
+            return result;
+        }
+    }
+
+    default_instruction.to_string()
 }
 
 fn expand_image_token_placeholders(prompt: &str, num_image_tokens: usize) -> Result<String> {
@@ -1649,12 +1668,64 @@ impl Qwen3VLEmbedding {
         self.model.device()
     }
 
+    /// Embed a batch of texts with custom instructions for each.
+    /// You can pass `None` for a specific item to use the default instruction.
+    pub fn embed_texts_with_instructions<S1: AsRef<str>, S2: AsRef<str>>(
+        &self, 
+        texts: &[S1], 
+        instructions: &[Option<S2>]
+    ) -> Result<Vec<Vec<f32>>> {
+        if texts.len() != instructions.len() {
+            return Err(candle_core::Error::Msg(
+                "texts and instructions must have the same length".into(),
+            ));
+        }
+
+        let text_inputs: Vec<Option<String>> =
+            texts.iter().map(|t| Some(t.as_ref().to_string())).collect();
+        let image_inputs: Vec<Option<DynamicImage>> = (0..texts.len()).map(|_| None).collect();
+        
+        let inst_inputs: Vec<Option<String>> = instructions
+            .iter()
+            .map(|inst| inst.as_ref().map(|s| s.as_ref().to_string()))
+            .collect();
+
+        self.embed_internal(text_inputs, image_inputs, inst_inputs)
+    }
+
+    /// Embed a batch of image paths with custom instructions for each.
+    pub fn embed_images_with_instructions<S1: AsRef<Path>, S2: AsRef<str>>(
+        &self, 
+        images: &[S1], 
+        instructions: &[Option<S2>]
+    ) -> Result<Vec<Vec<f32>>> {
+        if images.len() != instructions.len() {
+            return Err(candle_core::Error::Msg(
+                "images and instructions must have the same length".into(),
+            ));
+        }
+
+        let mut image_inputs = Vec::with_capacity(images.len());
+        for path in images {
+            image_inputs.push(Some(load_image_from_path(path.as_ref())?));
+        }
+        let text_inputs: Vec<Option<String>> = (0..images.len()).map(|_| None).collect();
+        
+        let inst_inputs: Vec<Option<String>> = instructions
+            .iter()
+            .map(|inst| inst.as_ref().map(|s| s.as_ref().to_string()))
+            .collect();
+
+        self.embed_internal(text_inputs, image_inputs, inst_inputs)
+    }
+
     /// Embed a batch of texts using Qwen3-VL prompt formatting.
     pub fn embed_texts<S: AsRef<str>>(&self, texts: &[S]) -> Result<Vec<Vec<f32>>> {
         let text_inputs: Vec<Option<String>> =
             texts.iter().map(|t| Some(t.as_ref().to_string())).collect();
         let image_inputs: Vec<Option<DynamicImage>> = (0..texts.len()).map(|_| None).collect();
-        self.embed_internal(text_inputs, image_inputs)
+        let instructions: Vec<Option<String>> = vec![None; texts.len()];
+        self.embed_internal(text_inputs, image_inputs, instructions)
     }
 
     /// Embed a batch of image paths.
@@ -1664,7 +1735,8 @@ impl Qwen3VLEmbedding {
             image_inputs.push(Some(load_image_from_path(path.as_ref())?));
         }
         let text_inputs: Vec<Option<String>> = (0..images.len()).map(|_| None).collect();
-        self.embed_internal(text_inputs, image_inputs)
+        let instructions: Vec<Option<String>> = vec![None; images.len()];
+        self.embed_internal(text_inputs, image_inputs, instructions)
     }
 
     /// Embed a batch of image bytes.
@@ -1679,17 +1751,19 @@ impl Qwen3VLEmbedding {
             image_inputs.push(Some(image));
         }
         let text_inputs: Vec<Option<String>> = (0..images.len()).map(|_| None).collect();
-        self.embed_internal(text_inputs, image_inputs)
+        let instructions: Vec<Option<String>> = vec![None; images.len()];
+        self.embed_internal(text_inputs, image_inputs, instructions)
     }
 
     fn embed_internal(
         &self,
         texts: Vec<Option<String>>,
         images: Vec<Option<DynamicImage>>,
+        instructions: Vec<Option<String>>,
     ) -> Result<Vec<Vec<f32>>> {
-        if texts.len() != images.len() {
+        if texts.len() != images.len() || texts.len() != instructions.len() {
             return Err(candle_core::Error::Msg(
-                "texts and images must have the same batch size".into(),
+                "texts, images, and instructions must have the same batch size".into(),
             ));
         }
         if texts.is_empty() {
@@ -1705,12 +1779,19 @@ impl Qwen3VLEmbedding {
         }
 
         let mut prompts = Vec::with_capacity(texts.len());
-        for (text, prepared) in texts.iter().zip(prepared_images.iter()) {
+        for (i, (text, prepared)) in texts.iter().zip(prepared_images.iter()).enumerate() {
+            
+            let final_instruction = prepare_instruction(
+                instructions[i].as_deref(),
+                &self.default_instruction
+            );
+
             let mut prompt = build_vl_prompt(
                 text.as_deref(),
                 prepared.is_some(),
-                &self.default_instruction,
+                &final_instruction,
             );
+            
             if let Some(prepared) = prepared {
                 prompt = expand_image_token_placeholders(&prompt, prepared.num_llm_tokens)?;
             }

@@ -79,6 +79,37 @@ fn parse_config_and_weight_prefix(config_bytes: &[u8]) -> Result<(Config, Option
     ))
 }
 
+fn find_safetensor_files(model_dir: &Path) -> Result<Vec<PathBuf>> {
+    let single = model_dir.join("model.safetensors");
+    if single.exists() {
+        return Ok(vec![single]);
+    }
+
+    let mut files = Vec::new();
+    for shard_idx in 1..=20 {
+        let entries =
+            std::fs::read_dir(model_dir).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let fname_str = fname.to_string_lossy();
+            if fname_str.starts_with(&format!("model-{:05}-of-", shard_idx))
+                && fname_str.ends_with(".safetensors")
+            {
+                files.push(entry.path());
+                break;
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Err(candle_core::Error::Msg(
+            "Could not locate model.safetensors or sharded weight files".into(),
+        ));
+    }
+    Ok(files)
+}
+
 #[derive(Deserialize, Debug, Clone)]
 struct Qwen3VLFullConfig {
     text_config: Config,
@@ -1081,6 +1112,51 @@ impl Qwen3TextEmbedding {
         Ok(Self { model, tokenizer })
     }
 
+    /// Load from a local directory containing model files.
+    ///
+    /// Required files in directory:
+    /// - config.json
+    /// - model.safetensors (or model-XXXXX-of-XXXXX.safetensors)
+    /// - tokenizer.json
+    pub fn from_path(
+        model_dir: impl AsRef<Path>,
+        device: &Device,
+        dtype: DType,
+        max_length: usize,
+    ) -> Result<Self> {
+        use tokenizers::{PaddingParams, PaddingStrategy, TruncationParams};
+
+        let model_dir = model_dir.as_ref();
+
+        let cfg_bytes = std::fs::read(model_dir.join("config.json"))
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let (cfg, weight_prefix) = parse_config_and_weight_prefix(&cfg_bytes)?;
+
+        let weight_files = find_safetensor_files(model_dir)?;
+
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_files, dtype, device)? };
+        let vb = match weight_prefix {
+            Some(prefix) => vb.pp(prefix),
+            None => vb,
+        };
+        let model = Qwen3Model::new(cfg, vb)?;
+
+        let mut tokenizer = tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json"))
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+        let _ = tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            direction: tokenizers::PaddingDirection::Left,
+            ..Default::default()
+        }));
+        let _ = tokenizer.with_truncation(Some(TruncationParams {
+            max_length,
+            ..Default::default()
+        }));
+
+        Ok(Self { model, tokenizer })
+    }
+
     pub fn config(&self) -> &Config {
         self.model.config()
     }
@@ -1203,6 +1279,59 @@ impl Qwen3VLEmbedding {
 
         let tok_path: PathBuf = repo.get("tokenizer.json").map_err(map_err)?;
         let mut tokenizer = tokenizers::Tokenizer::from_file(tok_path).map_err(map_err)?;
+        let _ = tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            direction: PaddingDirection::Right,
+            ..Default::default()
+        }));
+        let _ = tokenizer.with_truncation(Some(TruncationParams {
+            max_length,
+            ..Default::default()
+        }));
+
+        Ok(Self {
+            model,
+            vision,
+            tokenizer,
+            preprocessor,
+            image_token_id: cfg.image_token_id,
+            default_instruction: "Represent the user's input.".to_string(),
+        })
+    }
+
+    /// Load from a local directory containing model files.
+    ///
+    /// Required files in directory:
+    /// - config.json
+    /// - model.safetensors (or model-XXXXX-of-XXXXX.safetensors)
+    /// - tokenizer.json
+    /// - preprocessor_config.json
+    pub fn from_path(
+        model_dir: impl AsRef<Path>,
+        device: &Device,
+        dtype: DType,
+        max_length: usize,
+    ) -> Result<Self> {
+        use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, TruncationParams};
+
+        let model_dir = model_dir.as_ref();
+
+        let cfg_bytes = std::fs::read(model_dir.join("config.json")).map_err(map_err)?;
+        let cfg: Qwen3VLFullConfig = serde_json::from_slice(&cfg_bytes).map_err(map_err)?;
+
+        let preprocessor_bytes =
+            std::fs::read(model_dir.join("preprocessor_config.json")).map_err(map_err)?;
+        let preprocessor: Qwen3VLPreprocessorConfig =
+            serde_json::from_slice(&preprocessor_bytes).map_err(map_err)?;
+
+        let weight_files = find_safetensor_files(model_dir)?;
+
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_files, dtype, device)? };
+        let model = Qwen3Model::new(cfg.text_config.clone(), vb.pp("model").pp("language_model"))?;
+        let vision = Qwen3VLVisionModel::new(&cfg.vision_config, vb.pp("model").pp("visual"))?;
+
+        let mut tokenizer =
+            tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(map_err)?;
         let _ = tokenizer.with_padding(Some(PaddingParams {
             strategy: PaddingStrategy::BatchLongest,
             direction: PaddingDirection::Right,

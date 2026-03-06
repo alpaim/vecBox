@@ -390,6 +390,121 @@ fn preprocess_image(img: &DynamicImage, cfg: &Qwen3VLPreprocessorConfig) -> Resu
     })
 }
 
+fn preprocess_video(frames: &[DynamicImage], cfg: &Qwen3VLPreprocessorConfig) -> Result<PreparedImage> {
+    if frames.is_empty() {
+        return Err(candle_core::Error::Msg("Video frames list is empty".into()));
+    }
+
+    // Config validation
+    if cfg.image_mean.len() != 3 || cfg.image_std.len() != 3 {
+        return Err(candle_core::Error::Msg("Invalid mean/std config".into()));
+    }
+    
+    let mut processed_frames: Vec<std::borrow::Cow<DynamicImage>> = frames.iter().map(|f| std::borrow::Cow::Borrowed(f)).collect();
+    
+    if processed_frames.len() % cfg.temporal_patch_size != 0 {
+        if let Some(last) = processed_frames.last() {
+            processed_frames.push(last.clone());
+        }
+    }
+
+    let num_frames = processed_frames.len();
+    let grid_t = num_frames / cfg.temporal_patch_size;
+
+    // 2. Using FIRST frame as reference for resizing
+    let first_frame = &processed_frames[0];
+    let (orig_w, orig_h) = (first_frame.width(), first_frame.height());
+    let factor = cfg.patch_size * cfg.merge_size;
+    
+    let (resized_h, resized_w) = smart_resize(
+        orig_h as usize,
+        orig_w as usize,
+        factor,
+        cfg.min_pixels,
+        cfg.max_pixels,
+    )?;
+
+    // 3. Resizing all frames
+    let resized_frames: Vec<image::RgbImage> = processed_frames
+        .iter()
+        .map(|f| {
+            let rgb = f.to_rgb8();
+            let resized = image::imageops::resize(
+                &rgb,
+                resized_w as u32,
+                resized_h as u32,
+                FilterType::CatmullRom,
+            );
+            resized
+        })
+        .collect();
+
+    let grid_h = resized_h / cfg.patch_size;
+    let grid_w = resized_w / cfg.patch_size;
+    let merge = cfg.merge_size;
+
+    if grid_h % merge != 0 || grid_w % merge != 0 {
+        return Err(candle_core::Error::Msg(
+            "grid_h and grid_w must be divisible by merge_size".into(),
+        ));
+    }
+
+    let channels = 3usize;
+
+    let patch_dim = channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
+    
+    let total_patch_tokens = grid_t * grid_h * grid_w;
+    let mut out = Vec::with_capacity(total_patch_tokens * patch_dim);
+    
+    for t_block in 0..grid_t {
+        for gh_block in 0..(grid_h / merge) {
+            for gw_block in 0..(grid_w / merge) {
+                for mh in 0..merge {
+                    for mw in 0..merge {
+                        let gh = gh_block * merge + mh;
+                        let gw = gw_block * merge + mw;
+
+                        for c in 0..channels {
+                            for tp in 0..cfg.temporal_patch_size {
+                                let frame_idx = t_block * cfg.temporal_patch_size + tp;
+                                let frame = &resized_frames[frame_idx];
+
+                                for ph in 0..cfg.patch_size {
+                                    for pw in 0..cfg.patch_size {
+                                        let y = gh * cfg.patch_size + ph;
+                                        let x = gw * cfg.patch_size + pw;
+                                        
+                                        let pixel = if x < frame.width() as usize && y < frame.height() as usize {
+                                            frame.get_pixel(x as u32, y as u32).0[c]
+                                        } else {
+                                            0 // Padding
+                                        };
+                                        
+                                        let mut value = pixel as f32;
+                                        value *= cfg.rescale_factor;
+                                        value = (value - cfg.image_mean[c]) / cfg.image_std[c];
+                                        out.push(value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let num_llm_tokens = total_patch_tokens / (merge * merge);
+    
+    Ok(PreparedImage {
+        pixel_values: out,
+        grid_t: grid_t as u32,
+        grid_h: grid_h as u32,
+        grid_w: grid_w as u32,
+        num_llm_tokens,
+    })
+}
+
 fn build_vl_prompt(text: Option<&str>, include_image: bool, instruction: &str) -> String {
     let mut prompt = String::new();
     prompt.push_str("<|im_start|>system\n");
@@ -1719,6 +1834,54 @@ impl Qwen3VLEmbedding {
         self.embed_internal(text_inputs, image_inputs, inst_inputs)
     }
 
+    /// Embed a list of videos. Each video is represented as a list of frames (images).
+    /// Returns embeddings for each video.
+    pub fn embed_video_frames<S: AsRef<str>>(
+        &self,
+        videos: &[Vec<DynamicImage>],
+        instructions: &[Option<S>],
+    ) -> Result<Vec<Vec<f32>>> {
+        if videos.len() != instructions.len() {
+            return Err(candle_core::Error::Msg(
+                "videos and instructions must have the same length".into(),
+            ));
+        }
+
+        if videos.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 1. Video preprocessing
+        let mut prepared_videos = Vec::with_capacity(videos.len());
+        for frames in videos {
+            if frames.is_empty() {
+                prepared_videos.push(None);
+            } else {
+                let prepared = preprocess_video(frames, &self.preprocessor)?;
+                prepared_videos.push(Some(prepared));
+            }
+        }
+
+        // 2. Prompting
+        let mut prompts = Vec::with_capacity(videos.len());
+        for (i, prepared) in prepared_videos.iter().enumerate() {
+            let inst = prepare_instruction(
+                instructions[i].as_ref().map(|s| s.as_ref()), 
+                &self.default_instruction
+            );
+            
+            let mut prompt = build_vl_prompt(None, prepared.is_some(), &inst);
+            
+            if let Some(p) = prepared {
+                prompt = expand_image_token_placeholders(&prompt, p.num_llm_tokens)?;
+            }
+            prompts.push(prompt);
+        }
+
+        // 3. Inference
+        self.run_inference_on_prepared(prompts, prepared_videos)
+    }
+
     /// Embed a batch of texts using Qwen3-VL prompt formatting.
     pub fn embed_texts<S: AsRef<str>>(&self, texts: &[S]) -> Result<Vec<Vec<f32>>> {
         let text_inputs: Vec<Option<String>> =
@@ -1755,58 +1918,26 @@ impl Qwen3VLEmbedding {
         self.embed_internal(text_inputs, image_inputs, instructions)
     }
 
-    fn embed_internal(
+    fn run_inference_on_prepared(
         &self,
-        texts: Vec<Option<String>>,
-        images: Vec<Option<DynamicImage>>,
-        instructions: Vec<Option<String>>,
+        prompts: Vec<String>,
+        prepared_inputs: Vec<Option<PreparedImage>>,
     ) -> Result<Vec<Vec<f32>>> {
-        if texts.len() != images.len() || texts.len() != instructions.len() {
-            return Err(candle_core::Error::Msg(
-                "texts, images, and instructions must have the same batch size".into(),
-            ));
-        }
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
+        let device = self.model.device();
 
-        let mut prepared_images = Vec::with_capacity(images.len());
-        for image in &images {
-            prepared_images.push(match image {
-                Some(img) => Some(preprocess_image(img, &self.preprocessor)?),
-                None => None,
-            });
-        }
-
-        let mut prompts = Vec::with_capacity(texts.len());
-        for (i, (text, prepared)) in texts.iter().zip(prepared_images.iter()).enumerate() {
-            
-            let final_instruction = prepare_instruction(
-                instructions[i].as_deref(),
-                &self.default_instruction
-            );
-
-            let mut prompt = build_vl_prompt(
-                text.as_deref(),
-                prepared.is_some(),
-                &final_instruction,
-            );
-            
-            if let Some(prepared) = prepared {
-                prompt = expand_image_token_placeholders(&prompt, prepared.num_llm_tokens)?;
-            }
-            prompts.push(prompt);
-        }
-
+        // 1. Tokenizing text
         let encodings = self
             .tokenizer
             .encode_batch(prompts, true)
             .map_err(map_err)?;
+
         let batch_size = encodings.len();
         let seq_len = encodings[0].len();
+
+        // 2. Finding where to paste images to text (<|image_pad|>)
         let mut image_spans_per_batch = Vec::with_capacity(batch_size);
         for (batch_idx, encoding) in encodings.iter().enumerate() {
-            let Some(prepared) = prepared_images[batch_idx].as_ref() else {
+            let Some(prepared) = prepared_inputs[batch_idx].as_ref() else {
                 image_spans_per_batch.push(None);
                 continue;
             };
@@ -1814,20 +1945,21 @@ impl Qwen3VLEmbedding {
             let spans = find_token_spans(encoding.get_ids(), self.image_token_id);
             if spans.len() != 1 {
                 return Err(candle_core::Error::Msg(
-                    "Expected exactly one image token span per image input".into(),
+                    "Expected exactly one image token span per image/video input".into(),
                 ));
             }
             let (start, end) = spans[0];
             let span_len = end - start;
             if span_len != prepared.num_llm_tokens {
                 return Err(candle_core::Error::Msg(format!(
-                    "Image token span mismatch: prompt has {}, preprocessor expects {}",
+                    "Token span mismatch: prompt reserved {}, but visual feature needs {}",
                     span_len, prepared.num_llm_tokens
                 )));
             }
             image_spans_per_batch.push(Some((start, end)));
         }
 
+        // 3. Preparing text tensors (input_ids, attention_mask)
         let mut input_ids_vec = Vec::with_capacity(batch_size * seq_len);
         let mut attention_mask_vec = Vec::with_capacity(batch_size * seq_len);
         for encoding in &encodings {
@@ -1835,17 +1967,20 @@ impl Qwen3VLEmbedding {
             attention_mask_vec.extend(encoding.get_attention_mask().iter().map(|&m| m as f32));
         }
 
-        let device = self.model.device();
         let input_ids = Tensor::from_vec(input_ids_vec, (batch_size, seq_len), device)?;
         let attention_mask_2d =
             Tensor::from_vec(attention_mask_vec, (batch_size, seq_len), device)?;
+        
+        // Getting text embeddings
         let mut inputs_embeds = self.model.embed_tokens(&input_ids)?;
         let hidden_size = self.model.config().hidden_size;
+        
         let mut deepstack_additions: Option<Vec<Tensor>> = None;
         let mut position_ids: Option<Tensor> = None;
 
-        let num_images = prepared_images.iter().filter(|p| p.is_some()).count();
-        if num_images > 0 {
+        // 4. Vision preparing (if any)
+        let num_inputs = prepared_inputs.iter().filter(|p| p.is_some()).count();
+        if num_inputs > 0 {
             let patch_dim = 3
                 * self.preprocessor.temporal_patch_size
                 * self.preprocessor.patch_size
@@ -1853,7 +1988,9 @@ impl Qwen3VLEmbedding {
 
             let mut pixel_values = Vec::new();
             let mut grid_thw = Vec::new();
-            for prepared in prepared_images.iter().flatten() {
+
+            // Collecting all pixels of all images to one 
+            for prepared in prepared_inputs.iter().flatten() {
                 pixel_values.extend_from_slice(&prepared.pixel_values);
                 grid_thw.extend_from_slice(&[prepared.grid_t, prepared.grid_h, prepared.grid_w]);
             }
@@ -1862,17 +1999,23 @@ impl Qwen3VLEmbedding {
             let pixel_values =
                 Tensor::from_vec(pixel_values, (num_patch_tokens, patch_dim), device)?
                     .to_dtype(inputs_embeds.dtype())?;
-            let image_grid_thw = Tensor::from_vec(grid_thw, (num_images, 3), device)?;
+            
+            let image_grid_thw = Tensor::from_vec(grid_thw, (num_inputs, 3), device)?;
+            
+            // mRoPE
             position_ids = Some(build_image_position_ids(
                 &encodings,
                 &image_spans_per_batch,
-                &prepared_images,
+                &prepared_inputs,
                 self.preprocessor.merge_size,
                 device,
             )?);
 
-            let (image_embeds, deepstack_image_embeds) =
+            // Vision Tower
+            let (vision_embeds, deepstack_image_embeds) =
                 self.vision.forward(&pixel_values, &image_grid_thw)?;
+            
+            // 5. Injection
             let mut offset = 0usize;
 
             for (batch_idx, image_span) in image_spans_per_batch.iter().enumerate() {
@@ -1881,20 +2024,23 @@ impl Qwen3VLEmbedding {
                 };
                 let span_len = end - start;
 
-                let image_chunk = image_embeds.narrow(0, offset, span_len)?;
+                let image_chunk = vision_embeds.narrow(0, offset, span_len)?;
                 offset += span_len;
+                
+                // Replacing placeholders with real vectors of image 
                 inputs_embeds = inputs_embeds.slice_assign(
                     &[batch_idx..batch_idx + 1, *start..*end, 0..hidden_size],
                     &image_chunk.unsqueeze(0)?,
                 )?;
             }
 
-            if offset != image_embeds.dim(0)? {
+            if offset != vision_embeds.dim(0)? {
                 return Err(candle_core::Error::Msg(
                     "Unconsumed image embeddings remain after token injection".into(),
                 ));
             }
 
+            // Deepstack (if used)
             if !deepstack_image_embeds.is_empty() {
                 let mut per_layer_additions = Vec::with_capacity(deepstack_image_embeds.len());
                 for deepstack_layer in deepstack_image_embeds {
@@ -1916,28 +2062,61 @@ impl Qwen3VLEmbedding {
                             &chunk.unsqueeze(0)?,
                         )?;
                     }
-                    if deep_offset != deepstack_layer.dim(0)? {
-                        return Err(candle_core::Error::Msg(
-                            "Unconsumed deepstack image embeddings remain after token injection"
-                                .into(),
-                        ));
-                    }
                     per_layer_additions.push(addition);
                 }
                 deepstack_additions = Some(per_layer_additions);
             }
         }
 
+        // 6. Final LLM pass
         let attention_mask_4d = build_attention_mask_4d(&attention_mask_2d)?;
+        
         let hidden = self.model.forward_with_inputs_embeds(
             &inputs_embeds,
             Some(&attention_mask_4d),
             deepstack_additions.as_deref(),
             position_ids.as_ref(),
         )?;
+
+        // 7. Pooling
         let pooled = last_token_pool(&hidden, &attention_mask_2d)?;
         let normalized = l2_normalize(&pooled)?.to_dtype(DType::F32)?;
         normalized.to_vec2::<f32>()
+    }
+
+    fn embed_internal(
+        &self,
+        texts: Vec<Option<String>>,
+        images: Vec<Option<DynamicImage>>,
+        instructions: Vec<Option<String>>,
+    ) -> Result<Vec<Vec<f32>>> {
+        if texts.len() != images.len() || texts.len() != instructions.len() {
+             return Err(candle_core::Error::Msg("Batch sizes mismatch".into()));
+        }
+        if texts.is_empty() { return Ok(Vec::new()); }
+
+        let mut prepared_inputs = Vec::with_capacity(images.len());
+        for image in &images {
+            prepared_inputs.push(match image {
+                Some(img) => Some(preprocess_image(img, &self.preprocessor)?),
+                None => None,
+            });
+        }
+
+        let mut prompts = Vec::with_capacity(texts.len());
+        for (i, (text, prepared)) in texts.iter().zip(prepared_inputs.iter()).enumerate() {
+            let inst = prepare_instruction(
+                instructions[i].as_deref(),
+                &self.default_instruction
+            );
+            let mut prompt = build_vl_prompt(text.as_deref(), prepared.is_some(), &inst);
+            if let Some(prepared) = prepared {
+                prompt = expand_image_token_placeholders(&prompt, prepared.num_llm_tokens)?;
+            }
+            prompts.push(prompt);
+        }
+
+        self.run_inference_on_prepared(prompts, prepared_inputs)
     }
 }
 

@@ -8,9 +8,11 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::quantized::{gguf_file, QMatMul};
 use candle_nn::{linear, linear_no_bias, Activation, Linear, Module, VarBuilder};
 use image::{imageops::FilterType, DynamicImage};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +20,28 @@ use std::path::{Path, PathBuf};
 use hf_hub::api::sync::ApiBuilder;
 
 use crate::models::qwen3_vl::{Qwen3VLVisionModel, VisionConfig};
+
+pub enum QLinear {
+    Quantized(QMatMul),
+    QuantizedWithBias(QMatMul, Tensor),
+    Unquantized(candle_nn::Linear),
+}
+
+impl candle_nn::Module for QLinear {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Quantized(qm) => qm.forward(xs),
+            Self::QuantizedWithBias(qm, bias) => {
+                let out = qm.forward(xs)?;
+
+                let bias_cast = bias.to_dtype(out.dtype())?;
+                out.broadcast_add(&bias_cast)
+                // out.broadcast_add(bias)
+            }
+            Self::Unquantized(l) => l.forward(xs),
+        }
+    }
+}
 
 fn default_true() -> bool {
     true
@@ -158,6 +182,8 @@ fn build_attention_mask_4d(attention_mask_2d: &Tensor) -> Result<Tensor> {
     let device = attention_mask_2d.device();
     let mask_value = -1e4f32;
 
+    // Not sure if it is optimal
+
     let causal = {
         let mut data = vec![0.0f32; seq_len * seq_len];
         for i in 0..seq_len {
@@ -181,10 +207,12 @@ fn build_attention_mask_4d(attention_mask_2d: &Tensor) -> Result<Tensor> {
 }
 
 fn l2_normalize(xs: &Tensor) -> Result<Tensor> {
-    let sum_sq = xs.sqr()?.sum_keepdim(1)?;
+    let xs_f32 = xs.to_dtype(DType::F32)?;
+    let sum_sq = xs_f32.sqr()?.sum_keepdim(1)?;
     let eps_tensor = Tensor::new(&[1e-12f32], xs.device())?.broadcast_as(sum_sq.shape())?;
     let norm = sum_sq.add(&eps_tensor)?.sqrt()?;
-    xs.broadcast_div(&norm)
+    // xs.broadcast_div(&norm)
+    xs_f32.broadcast_div(&norm)?.to_dtype(xs.dtype())
 }
 
 fn last_token_pool(hidden: &Tensor, attention_mask_2d: &Tensor) -> Result<Tensor> {
@@ -509,6 +537,10 @@ impl Qwen3RMSNorm {
         let weight = vb.get((dim,), "weight")?;
         Ok(Self { weight, eps })
     }
+
+    pub fn from_tensor(weight: Tensor, eps: f64) -> Self {
+        Self { weight, eps }
+    }
 }
 
 impl Module for Qwen3RMSNorm {
@@ -534,17 +566,17 @@ impl Module for Qwen3RMSNorm {
 }
 
 pub struct Qwen3MLP {
-    gate_proj: Linear, // hidden -> intermediate
-    up_proj: Linear,   // hidden -> intermediate
-    down_proj: Linear, // intermediate -> hidden
+    gate_proj: QLinear, // hidden -> intermediate
+    up_proj: QLinear,   // hidden -> intermediate
+    down_proj: QLinear, // intermediate -> hidden
     act_fn: Activation,
 }
 
 impl Qwen3MLP {
     pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
-        let gate_proj = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))?;
-        let up_proj = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))?;
-        let down_proj = linear_no_bias(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"))?;
+        let gate_proj = QLinear::Unquantized(linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))?);
+        let up_proj = QLinear::Unquantized(linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))?);
+        let down_proj = QLinear::Unquantized(linear_no_bias(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"))?);
         Ok(Self {
             gate_proj,
             up_proj,
@@ -651,6 +683,8 @@ impl Qwen3RotaryEmbedding {
             let pos = position_ids.to_device(dev)?.to_vec3::<u32>()?;
             let mut freqs = vec![0f32; b * t * d2];
 
+            // Not sure if it will work fine on GPU
+
             for batch_idx in 0..b {
                 for tok_idx in 0..t {
                     let base = (batch_idx * t + tok_idx) * d2;
@@ -739,10 +773,10 @@ fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor> {
 // - RoPE on q,k
 // - repeat_kv for key/value (GQA)
 pub struct Qwen3Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: QLinear,
+    k_proj: QLinear,
+    v_proj: QLinear,
+    o_proj: QLinear,
     q_norm: Qwen3RMSNorm, // dim = head_dim
     k_norm: Qwen3RMSNorm, // dim = head_dim
 
@@ -768,24 +802,24 @@ impl Qwen3Attention {
         let kv_out = num_kv_heads * head_dim;
 
         let q_proj = if cfg.attention_bias {
-            linear(cfg.hidden_size, q_out, vb.pp("q_proj"))?
+            QLinear::Unquantized(linear(cfg.hidden_size, q_out, vb.pp("q_proj"))?)
         } else {
-            linear_no_bias(cfg.hidden_size, q_out, vb.pp("q_proj"))?
+            QLinear::Unquantized(linear_no_bias(cfg.hidden_size, q_out, vb.pp("q_proj"))?)
         };
         let k_proj = if cfg.attention_bias {
-            linear(cfg.hidden_size, kv_out, vb.pp("k_proj"))?
+            QLinear::Unquantized(linear(cfg.hidden_size, kv_out, vb.pp("k_proj"))?)
         } else {
-            linear_no_bias(cfg.hidden_size, kv_out, vb.pp("k_proj"))?
+            QLinear::Unquantized(linear_no_bias(cfg.hidden_size, kv_out, vb.pp("k_proj"))?)
         };
         let v_proj = if cfg.attention_bias {
-            linear(cfg.hidden_size, kv_out, vb.pp("v_proj"))?
+            QLinear::Unquantized(linear(cfg.hidden_size, kv_out, vb.pp("v_proj"))?)
         } else {
-            linear_no_bias(cfg.hidden_size, kv_out, vb.pp("v_proj"))?
+            QLinear::Unquantized(linear_no_bias(cfg.hidden_size, kv_out, vb.pp("v_proj"))?)
         };
         let o_proj = if cfg.attention_bias {
-            linear(q_out, cfg.hidden_size, vb.pp("o_proj"))?
+            QLinear::Unquantized(linear(q_out, cfg.hidden_size, vb.pp("o_proj"))?)
         } else {
-            linear_no_bias(q_out, cfg.hidden_size, vb.pp("o_proj"))?
+            QLinear::Unquantized(linear_no_bias(q_out, cfg.hidden_size, vb.pp("o_proj"))?)
         };
 
         // q_norm/k_norm are RMSNorm(head_dim)
@@ -849,11 +883,12 @@ impl Qwen3Attention {
         let kt = k.transpose(2, 3)?; // [B,Nh,D,T]
         let mut attn = q.matmul(&kt)?; // [B,Nh,T,T]
 
-        let scale = scalar_f32(attn.device(), self.scaling)?;
+        let scale = scalar_f32(attn.device(), self.scaling)?.to_dtype(attn.dtype())?;
         attn = attn.broadcast_mul(&scale)?;
 
         if let Some(mask) = attention_mask {
-            attn = attn.broadcast_add(mask)?;
+            let mask_cast = mask.to_dtype(attn.dtype())?;
+            attn = attn.broadcast_add(&mask_cast)?;
         }
 
         // softmax over last dim
@@ -1011,6 +1046,183 @@ impl Qwen3Model {
     pub fn device(&self) -> &Device {
         &self.device
     }
+
+    fn get_gguf_tensor(
+        name: &str,
+        content: &gguf_file::Content,
+        file: &mut std::fs::File,
+        device: &Device,
+        dtype: DType,
+    ) -> candle_core::Result<Tensor> {
+        // Pass `device` as the 3rd argument
+        let qt = content.tensor(file, name, device)
+            .map_err(|e| candle_core::Error::Msg(format!("Missing {name}: {e}")))?;
+        qt.dequantize(device)?.to_dtype(dtype)
+    }
+
+    fn get_gguf_qlinear(
+        name: &str,
+        content: &gguf_file::Content,
+        file: &mut std::fs::File,
+        device: &Device,
+        dtype: DType,
+    ) -> candle_core::Result<QLinear> {
+        // Pass `device` as the 3rd argument
+        let qt = content.tensor(file, &format!("{name}.weight"), device)
+            .map_err(|e| candle_core::Error::Msg(format!("Missing {name}.weight: {e}")))?;
+        let inner = QMatMul::from_qtensor(qt)?;
+
+        // Pass `device` as the 3rd argument here as well
+        if let Ok(qt_bias) = content.tensor(file, &format!("{name}.bias"), device) {
+            let bias = qt_bias.dequantize(device)?.to_dtype(dtype)?;
+            Ok(QLinear::QuantizedWithBias(inner, bias))
+        } else {
+            Ok(QLinear::Quantized(inner))
+        }
+    }
+
+    pub fn from_gguf(
+        cfg: Config,
+        content: &gguf_file::Content,
+        file: &mut std::fs::File,
+        device: &Device,
+        dtype: DType,
+    ) -> candle_core::Result<Self> {
+        let tok_emb = Self::get_gguf_tensor("token_embd.weight", content, file, device, dtype)?;
+        let embed_tokens = candle_nn::Embedding::new(tok_emb, cfg.hidden_size);
+
+        let norm_weight = Self::get_gguf_tensor("output_norm.weight", content, file, device, dtype)?;
+        let norm = Qwen3RMSNorm::from_tensor(norm_weight, cfg.rms_norm_eps);
+
+        let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
+        for i in 0..cfg.num_hidden_layers {
+            let q_proj = Self::get_gguf_qlinear(&format!("blk.{i}.attn_q"), content, file, device, dtype)?;
+            let k_proj = Self::get_gguf_qlinear(&format!("blk.{i}.attn_k"), content, file, device, dtype)?;
+            let v_proj = Self::get_gguf_qlinear(&format!("blk.{i}.attn_v"), content, file, device, dtype)?;
+            let o_proj = Self::get_gguf_qlinear(&format!("blk.{i}.attn_output"), content, file, device, dtype)?;
+            
+            let q_norm_w = Self::get_gguf_tensor(&format!("blk.{i}.attn_q_norm.weight"), content, file, device, dtype)?;
+            let k_norm_w = Self::get_gguf_tensor(&format!("blk.{i}.attn_k_norm.weight"), content, file, device, dtype)?;
+            
+            let gate_proj = Self::get_gguf_qlinear(&format!("blk.{i}.ffn_gate"), content, file, device, dtype)?;
+            let up_proj = Self::get_gguf_qlinear(&format!("blk.{i}.ffn_up"), content, file, device, dtype)?;
+            let down_proj = Self::get_gguf_qlinear(&format!("blk.{i}.ffn_down"), content, file, device, dtype)?;
+            
+            let input_norm_w = Self::get_gguf_tensor(&format!("blk.{i}.attn_norm.weight"), content, file, device, dtype)?;
+            let post_attn_norm_w = Self::get_gguf_tensor(&format!("blk.{i}.ffn_norm.weight"), content, file, device, dtype)?;
+
+            layers.push(Qwen3DecoderLayer {
+                self_attn: Qwen3Attention {
+                    q_proj, k_proj, v_proj, o_proj,
+                    q_norm: Qwen3RMSNorm::from_tensor(q_norm_w, cfg.rms_norm_eps),
+                    k_norm: Qwen3RMSNorm::from_tensor(k_norm_w, cfg.rms_norm_eps),
+                    num_heads: cfg.num_attention_heads,
+                    num_kv_heads: cfg.num_key_value_heads,
+                    num_kv_groups: cfg.num_kv_groups(),
+                    head_dim: cfg.head_dim(),
+                    scaling: (cfg.head_dim() as f32).powf(-0.5),
+                },
+                mlp: Qwen3MLP { gate_proj, up_proj, down_proj, act_fn: cfg.hidden_act },
+                input_layernorm: Qwen3RMSNorm::from_tensor(input_norm_w, cfg.rms_norm_eps),
+                post_attention_layernorm: Qwen3RMSNorm::from_tensor(post_attn_norm_w, cfg.rms_norm_eps),
+            });
+        }
+
+        let rotary_emb = Qwen3RotaryEmbedding::new(&cfg, device)?;
+
+        Ok(Self { embed_tokens, layers, norm, rotary_emb, cfg, device: device.clone() })
+    }
+
+    pub fn load_vision_mmproj_varbuilder<'a>(
+        path: &std::path::Path,
+        device: &Device,
+        dtype: DType, 
+    ) -> candle_core::Result<candle_nn::VarBuilder<'a>> {
+        let mut file = std::fs::File::open(path)?;
+        let content = gguf_file::Content::read(&mut file).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+        let mut tensors = std::collections::HashMap::new();
+        
+        // We need to catch the two halves of the 3D patch embedding kernel
+        let mut patch_embd_0 = None;
+        let mut patch_embd_1 = None;
+
+        for (name, _) in content.tensor_infos.iter() {
+            let qtensor = content.tensor(&mut file, name, device)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            let tensor = qtensor.dequantize(device)?.to_dtype(dtype)?;
+
+            // Intercept the split patch embedding weights
+            if name == "v.patch_embd.weight" {
+                patch_embd_0 = Some(tensor);
+                continue;
+            } else if name == "v.patch_embd.weight.1" {
+                patch_embd_1 = Some(tensor);
+                continue;
+            }
+
+            let mut mapped_name = name.to_string();
+
+            // 1. Patch Embed Bias
+            if mapped_name == "v.patch_embd.bias" {
+                mapped_name = "patch_embed.proj.bias".to_string();
+            }
+            // 2. Position Embeddings
+            else if mapped_name == "v.position_embd.weight" {
+                mapped_name = "pos_embed.weight".to_string();
+            }
+            // 3. Final Merger (mm.0 = fc1, mm.2 = fc2, post_ln = norm)
+            else if mapped_name.starts_with("mm.0.") {
+                mapped_name = mapped_name.replace("mm.0.", "merger.linear_fc1.");
+            } else if mapped_name.starts_with("mm.2.") {
+                mapped_name = mapped_name.replace("mm.2.", "merger.linear_fc2.");
+            } else if mapped_name == "v.post_ln.weight" {
+                mapped_name = "merger.norm.weight".to_string();
+            } else if mapped_name == "v.post_ln.bias" {
+                mapped_name = "merger.norm.bias".to_string();
+            }
+            // 4. Deepstack Mergers
+            else if mapped_name.starts_with("v.deepstack.") {
+                mapped_name = mapped_name
+                    .replace("v.deepstack.5.", "deepstack_merger_list.0.")
+                    .replace("v.deepstack.11.", "deepstack_merger_list.1.")
+                    .replace("v.deepstack.17.", "deepstack_merger_list.2.")
+                    .replace(".fc1.", ".linear_fc1.")
+                    .replace(".fc2.", ".linear_fc2.");
+            }
+            // 5. Vision Blocks
+            else if mapped_name.starts_with("v.blk.") {
+                mapped_name = mapped_name
+                    .replace("v.blk.", "blocks.")
+                    .replace(".attn_out.", ".attn.proj.")
+                    .replace(".attn_qkv.", ".attn.qkv.")
+                    .replace(".ffn_up.", ".mlp.linear_fc1.")    // llama.cpp up = safetensors fc1
+                    .replace(".ffn_down.", ".mlp.linear_fc2.")  // llama.cpp down = safetensors fc2
+                    .replace(".ln1.", ".norm1.")
+                    .replace(".ln2.", ".norm2.");
+            }
+
+            tensors.insert(mapped_name, tensor);
+        }
+
+        // 6. Reconstruct the 3D Patch Embedding Kernel by stacking the temporal dimension
+        if let Some(t0) = patch_embd_0 {
+        if let Some(t1) = patch_embd_1 {
+                let t0 = t0.unsqueeze(2)?;
+                let t1 = t1.unsqueeze(2)?;
+                let stacked = candle_core::Tensor::cat(&[&t0, &t1], 2)?;
+                tensors.insert("patch_embed.proj.weight".to_string(), stacked);
+            } else {
+                tensors.insert("patch_embed.proj.weight".to_string(), t0);
+            }
+        } else {
+            return Err(candle_core::Error::Msg(
+                "Missing v.patch_embd.weight in the mmproj file!".to_string()
+            ));
+        }
+
+        Ok(candle_nn::VarBuilder::from_tensors(tensors, dtype, device))
+    }
 }
 
 /// High-level embedding wrapper around [`Qwen3Model`] that handles tokenization,
@@ -1142,6 +1354,41 @@ impl Qwen3TextEmbedding {
         let model = Qwen3Model::new(cfg, vb)?;
 
         let mut tokenizer = tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json"))
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+        let _ = tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            direction: tokenizers::PaddingDirection::Left,
+            ..Default::default()
+        }));
+        let _ = tokenizer.with_truncation(Some(TruncationParams {
+            max_length,
+            ..Default::default()
+        }));
+
+        Ok(Self { model, tokenizer })
+    }
+
+    pub fn from_gguf(
+        gguf_path: impl AsRef<Path>,
+        model_dir_for_configs: impl AsRef<Path>,
+        device: &Device,
+        dtype: DType,
+        max_length: usize,
+    ) -> Result<Self> {
+        use tokenizers::{PaddingParams, PaddingStrategy, TruncationParams};
+
+        let mut file = std::fs::File::open(gguf_path.as_ref())?;
+        let content = gguf_file::Content::read(&mut file)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+        let cfg_bytes = std::fs::read(model_dir_for_configs.as_ref().join("config.json"))
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let (cfg, _) = parse_config_and_weight_prefix(&cfg_bytes)?;
+
+        let model = Qwen3Model::from_gguf(cfg, &content, &mut file, device, dtype)?;
+
+        let mut tokenizer = tokenizers::Tokenizer::from_file(model_dir_for_configs.as_ref().join("tokenizer.json"))
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
         let _ = tokenizer.with_padding(Some(PaddingParams {
@@ -1352,6 +1599,48 @@ impl Qwen3VLEmbedding {
         })
     }
 
+    pub fn from_gguf_and_mmproj(
+        text_gguf_path: impl AsRef<std::path::Path>,
+        mmproj_path: impl AsRef<std::path::Path>,
+        model_dir_for_configs: impl AsRef<std::path::Path>, // Needs the dir for configs/tokenizer
+        device: &Device,
+        dtype: DType, // Pass DType::F32 or DType::BF16
+    ) -> candle_core::Result<Self> {
+        // 1. Load Configurations
+        let model_dir = model_dir_for_configs.as_ref();
+        let cfg_bytes = std::fs::read(model_dir.join("config.json")).map_err(map_err)?;
+        let cfg: Qwen3VLFullConfig = serde_json::from_slice(&cfg_bytes).map_err(map_err)?;
+
+        let preprocessor_bytes = std::fs::read(model_dir.join("preprocessor_config.json")).map_err(map_err)?;
+        let preprocessor: Qwen3VLPreprocessorConfig = serde_json::from_slice(&preprocessor_bytes).map_err(map_err)?;
+
+        // 2. Load Quantized Text GGUF
+        let mut text_file = std::fs::File::open(text_gguf_path.as_ref())?;
+        let text_content = gguf_file::Content::read(&mut text_file).map_err(map_err)?;
+        let text_model = Qwen3Model::from_gguf(cfg.text_config.clone(), &text_content, &mut text_file, device, dtype)?;
+
+        // 3. Load F16 Vision mmproj
+        let vision_vb = Qwen3Model::load_vision_mmproj_varbuilder(mmproj_path.as_ref(), device, dtype)?;
+        let vision_model = Qwen3VLVisionModel::new(&cfg.vision_config, vision_vb)?;
+
+        // 4. Tokenizer
+        let mut tokenizer = tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(map_err)?;
+        let _ = tokenizer.with_padding(Some(tokenizers::PaddingParams {
+            strategy: tokenizers::PaddingStrategy::BatchLongest,
+            direction: tokenizers::PaddingDirection::Right,
+            ..Default::default()
+        }));
+
+        Ok(Self {
+            model: text_model,
+            vision: vision_model,
+            tokenizer,
+            preprocessor,
+            image_token_id: cfg.image_token_id,
+            default_instruction: "Represent the user's input.".to_string(),
+        })
+    }
+
     pub fn config(&self) -> &Config {
         self.model.config()
     }
@@ -1490,7 +1779,8 @@ impl Qwen3VLEmbedding {
 
             let num_patch_tokens = pixel_values.len() / patch_dim;
             let pixel_values =
-                Tensor::from_vec(pixel_values, (num_patch_tokens, patch_dim), device)?;
+                Tensor::from_vec(pixel_values, (num_patch_tokens, patch_dim), device)?
+                    .to_dtype(inputs_embeds.dtype())?;
             let image_grid_thw = Tensor::from_vec(grid_thw, (num_images, 3), device)?;
             position_ids = Some(build_image_position_ids(
                 &encodings,

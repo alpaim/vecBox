@@ -28,6 +28,11 @@ pub enum QLinear {
     Unquantized(candle_nn::Linear),
 }
 
+pub enum VisualInput {
+    Image(DynamicImage),
+    Video(Vec<DynamicImage>),
+}
+
 impl candle_nn::Module for QLinear {
     fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
         match self {
@@ -1781,6 +1786,59 @@ impl Qwen3VLEmbedding {
 
     pub fn device(&self) -> &Device {
         self.model.device()
+    }
+
+    pub fn embed_batch<S1: AsRef<str>, S2: AsRef<str>>(
+        &self,
+        visuals: &[Option<VisualInput>],
+        texts: &[Option<S1>],
+        instructions: &[Option<S2>],
+    ) -> Result<Vec<Vec<f32>>> {
+        let batch_size = visuals.len();
+        if texts.len() != batch_size || instructions.len() != batch_size {
+            return Err(candle_core::Error::Msg(
+                "visuals, texts, and instructions must have the same length".into(),
+            ));
+        }
+
+        let mut prepared_inputs = Vec::with_capacity(batch_size);
+
+        for visual in visuals {
+            let prepared = match visual {
+                Some(VisualInput::Image(img)) => {
+                    Some(preprocess_image(img, &self.preprocessor)?)
+                }
+                Some(VisualInput::Video(frames)) => {
+                    if frames.is_empty() {
+                         return Err(candle_core::Error::Msg("Empty video frames".into()));
+                    }
+                    Some(preprocess_video(frames, &self.preprocessor)?)
+                }
+                None => None,
+            };
+            prepared_inputs.push(prepared);
+        }
+
+        let mut prompts = Vec::with_capacity(batch_size);
+        
+        for (i, prepared) in prepared_inputs.iter().enumerate() {
+            let user_text = texts[i].as_ref().map(|s| s.as_ref());
+            
+            let inst = prepare_instruction(
+                instructions[i].as_ref().map(|s| s.as_ref()), 
+                &self.default_instruction
+            );
+            
+            let mut prompt = build_vl_prompt(user_text, prepared.is_some(), &inst);
+            
+            if let Some(p) = prepared {
+                prompt = expand_image_token_placeholders(&prompt, p.num_llm_tokens)?;
+            }
+            prompts.push(prompt);
+        }
+
+        // Inference
+        self.run_inference_on_prepared(prompts, prepared_inputs)
     }
 
     /// Embed a batch of texts with custom instructions for each.

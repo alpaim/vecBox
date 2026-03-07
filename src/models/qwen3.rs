@@ -36,13 +36,26 @@ pub enum VisualInput {
 impl candle_nn::Module for QLinear {
     fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
         match self {
-            Self::Quantized(qm) => qm.forward(xs),
+            Self::Quantized(qm) => {
+                if xs.dtype() == DType::F32 {
+                    qm.forward(xs)
+                } else {
+                    let xs_f32 = xs.to_dtype(DType::F32)?;
+                    let out_f32 = qm.forward(&xs_f32)?;
+                    out_f32.to_dtype(xs.dtype())
+                }
+            },
             Self::QuantizedWithBias(qm, bias) => {
-                let out = qm.forward(xs)?;
+                let out = if xs.dtype() == DType::F32 {
+                    qm.forward(xs)?
+                } else {
+                    let xs_f32 = xs.to_dtype(DType::F32)?;
+                    let out_f32 = qm.forward(&xs_f32)?;
+                    out_f32.to_dtype(xs.dtype())?
+                };
 
                 let bias_cast = bias.to_dtype(out.dtype())?;
                 out.broadcast_add(&bias_cast)
-                // out.broadcast_add(bias)
             }
             Self::Unquantized(l) => l.forward(xs),
         }

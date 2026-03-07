@@ -3,10 +3,10 @@
 
 use std::f64;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{
-    embedding, layer_norm, linear, Activation, Embedding, LayerNorm, LayerNormConfig, Linear,
-    Module, VarBuilder,
+    Activation, Embedding, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, embedding,
+    layer_norm, linear,
 };
 use serde::Deserialize;
 
@@ -300,18 +300,28 @@ impl VisionAttention {
             let v_chunk = v.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
 
             let mut chunk_out = {
-                let q = q_chunk.unsqueeze(0)?;
-                let k = k_chunk.unsqueeze(0)?;
-                let v = v_chunk.unsqueeze(0)?;
+                let q_4d = q_chunk.unsqueeze(0)?;
+                let k_4d = k_chunk.unsqueeze(0)?;
+                let v_4d = v_chunk.unsqueeze(0)?;
 
-                let attn_weights =
-                    (q.matmul(&k.transpose(2, 3)?)? / (self.head_dim as f64).sqrt())?;
-                let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-                attn_weights.matmul(&v)?
+                let scale = 1.0 / (self.head_dim as f64).sqrt();
+
+                // Flash Attention
+                let attn_out = candle_nn::ops::sdpa(
+                    &q_4d,
+                    &k_4d,
+                    &v_4d,
+                    None,
+                    false,
+                    scale as f32,
+                    1.0,
+                )?;
+
+                attn_out
+                    .squeeze(0)?
+                    .transpose(0, 1)?
             };
-            chunk_out = chunk_out.squeeze(0)?.transpose(0, 1)?;
 
-            chunk_out.device().synchronize()?;
             chunk_out = chunk_out.reshape((len, self.num_heads * self.head_dim))?;
             outputs.push(chunk_out.to_dtype(xs.dtype())?);
         }

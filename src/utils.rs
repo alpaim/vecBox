@@ -1,6 +1,33 @@
 use std::fs;
 use std::path::Path;
 
+use candle_core::{Device, DType};
+
+#[cfg(feature = "cuda")]
+pub fn get_device() -> anyhow::Result<Device> {
+    Ok(Device::new_cuda(0)?)
+}
+
+#[cfg(feature = "metal")]
+pub fn get_device() -> anyhow::Result<Device> {
+    Ok(Device::new_metal(0)?)
+}
+
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+pub fn get_device() -> anyhow::Result<Device> {
+    Ok(Device::Cpu)
+}
+
+#[cfg(feature = "cuda")]
+pub fn get_device_dtype() -> anyhow::Result<DType> {
+    Ok(DType::F16)  // F16 is better for GPU
+}
+
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+pub fn get_device_dtype() -> anyhow::Result<DType> {
+    Ok(DType::F32)
+}
+
 pub fn resolve_input(s: &str) -> String {
     let path = Path::new(s);
     if path.exists() && path.is_file() {

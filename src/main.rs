@@ -18,12 +18,15 @@ fn main() -> anyhow::Result<()> {
     let downloaded = download::download_model(repo, quant)?;
     println!("Model downloaded successfully!");
 
+    let device = utils::get_device()?;
+    let dtype = utils::get_device_dtype()?;
+
     let embedder = models::qwen3::Qwen3VLEmbedding::from_gguf_and_mmproj(
         downloaded.gguf_path,
         downloaded.mmproj_path,
         downloaded.config_dir,
-        &candle_core::Device::Cpu,
-        candle_core::DType::F32,
+        &device,
+        dtype,
     )?;
 
     println!("Model loaded successfully!");

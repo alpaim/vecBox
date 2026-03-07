@@ -3,29 +3,35 @@ use std::path::Path;
 
 use candle_core::{Device, DType};
 
-#[cfg(feature = "cuda")]
 pub fn get_device() -> anyhow::Result<Device> {
-    Ok(Device::new_cuda(0)?)
-}
+    #[cfg(feature = "cuda")]
+    {
+        // Trying to get CUDA device
+        if let Ok(device) = Device::new_cuda(0) {
+            return Ok(device);
+        }
+        println!("Warning: CUDA is unavailable, fallback to CPU.");
+    }
 
-#[cfg(feature = "metal")]
-pub fn get_device() -> anyhow::Result<Device> {
-    Ok(Device::new_metal(0)?)
-}
+    #[cfg(feature = "metal")]
+    {
+        // Trying to get Metal device
+        if let Ok(device) = Device::new_metal(0) {
+            return Ok(device);
+        }
+        println!("Warning: Metal is unavailable, fallback to CPU.");
+    }
 
-#[cfg(not(any(feature = "cuda", feature = "metal")))]
-pub fn get_device() -> anyhow::Result<Device> {
+    // Default CPU fallback
     Ok(Device::Cpu)
 }
 
-#[cfg(feature = "cuda")]
-pub fn get_device_dtype() -> anyhow::Result<DType> {
-    Ok(DType::F16)  // F16 is better for GPU
-}
-
-#[cfg(not(any(feature = "cuda", feature = "metal")))]
-pub fn get_device_dtype() -> anyhow::Result<DType> {
-    Ok(DType::F32)
+pub fn get_device_dtype(device: &Device) -> anyhow::Result<DType> {
+    match device {
+        Device::Cpu => Ok(DType::F32), // F32 is better for CPU
+        Device::Metal(_) => Ok(DType::F16),
+        Device::Cuda(_) => Ok(DType::BF16), // Not sure how to better manage F16 (up to RTX3000) and BF16
+    }
 }
 
 pub fn resolve_input(s: &str) -> String {

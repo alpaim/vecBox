@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     println!("Model downloaded successfully!");
 
     let device = utils::get_device()?;
-    let dtype = utils::get_device_dtype()?;
+    let dtype = utils::get_device_dtype(&device)?;
 
     let embedder = models::qwen3::Qwen3VLEmbedding::from_gguf_and_mmproj(
         downloaded.gguf_path,

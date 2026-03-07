@@ -156,7 +156,9 @@ jobs:
           cuda_version: '12.4'
 
       - name: Build
+        shell: cmd
         run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
           cargo build --release --features cuda --target x86_64-pc-windows-msvc
 
       - name: Determine tag name

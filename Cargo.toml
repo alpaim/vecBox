@@ -32,3 +32,6 @@ accelerate-src = { version = "0.3.2", optional = true }
 tokenizers = { version = "0.22.2" }
 
 hf-hub = { version = "0.5.0" }
+
+clap = { version = "4.5.60", features = ["derive"] }
+dirs = "5"

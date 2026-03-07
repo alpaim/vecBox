@@ -1,0 +1,257 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  CARGO_PROFILE_RELEASE_LTO: thin
+  CUDA_COMPUTE_CAP: "86"
+
+jobs:
+  linux-cpu-x64:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Build
+        run: |
+          cargo build --release --features mkl --target x86_64-unknown-linux-gnu
+
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "version=${SHORT_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Pack artifacts
+        run: |
+          mkdir -p release
+          tar -czvf vecBox-${{ steps.version.outputs.version }}-bin-linux-cpu-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vecBox
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: vecBox-${{ steps.version.outputs.version }}-bin-linux-cpu-x86_64.tar.gz
+          name: vecBox-bin-linux-cpu-x86_64.tar.gz
+
+  linux-cuda-x64:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Setup CUDA
+        uses: ./.github/actions/linux-setup-cuda
+        with:
+          cuda_version: '12.4'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Build
+        run: |
+          cargo build --release --features cuda --target x86_64-unknown-linux-gnu
+
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "version=${SHORT_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Pack artifacts
+        run: |
+          mkdir -p release
+          tar -czvf vecBox-${{ steps.version.outputs.version }}-bin-linux-cuda-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vecBox
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: vecBox-${{ steps.version.outputs.version }}-bin-linux-cuda-x86_64.tar.gz
+          name: vecBox-bin-linux-cuda-x86_64.tar.gz
+
+  windows-cpu-x64:
+    runs-on: windows-2025
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: |
+          cargo build --release --features mkl --target x86_64-pc-windows-msvc
+
+      - name: Get version info
+        id: version
+        shell: pwsh
+        run: |
+          $shortHash = git rev-parse --short=7 HEAD
+          echo "version=$shortHash" >> $env:GITHUB_OUTPUT
+
+      - name: Pack artifacts
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/vecBox.exe -DestinationPath vecBox-${{ steps.version.outputs.version }}-bin-win-cpu-x64.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: vecBox-${{ steps.version.outputs.version }}-bin-win-cpu-x64.zip
+          name: vecBox-bin-win-cpu-x64.zip
+
+  windows-cuda-x64:
+    runs-on: windows-2022
+
+    env:
+      CUDA_PATH: 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4'
+      CUDA_HOME: 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4'
+      CUDA_TOOLKIT_ROOT_DIR: 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4'
+      CUDA_COMPUTE_CAP: '86'
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup CUDA
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: '12.4'
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          set PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin;%PATH%
+          cargo build --release --features cuda --target x86_64-pc-windows-msvc
+
+      - name: Get version info
+        id: version
+        shell: pwsh
+        run: |
+          $shortHash = git rev-parse --short=7 HEAD
+          echo "version=$shortHash" >> $env:GITHUB_OUTPUT
+
+      - name: Pack artifacts
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/vecBox.exe -DestinationPath vecBox-${{ steps.version.outputs.version }}-bin-win-cuda-x64.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: vecBox-${{ steps.version.outputs.version }}-bin-win-cuda-x64.zip
+          name: vecBox-bin-win-cuda-x64.zip
+
+  macos-arm64:
+    runs-on: macos-14
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build
+        run: |
+          cargo build --release --features metal --target aarch64-apple-darwin
+
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "version=${SHORT_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Pack artifacts
+        run: |
+          mkdir -p release
+          tar -czvf vecBox-${{ steps.version.outputs.version }}-bin-macos-arm64.tar.gz -C target/aarch64-apple-darwin/release vecBox
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: vecBox-${{ steps.version.outputs.version }}-bin-macos-arm64.tar.gz
+          name: vecBox-bin-macos-arm64.tar.gz
+
+  macos-x64:
+    runs-on: macos-15-intel
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Build
+        run: |
+          cargo build --release --features accelerate --target x86_64-apple-darwin
+
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "version=${SHORT_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Pack artifacts
+        run: |
+          mkdir -p release
+          tar -czvf vecBox-${{ steps.version.outputs.version }}-bin-macos-x64.tar.gz -C target/x86_64-apple-darwin/release vecBox
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: vecBox-${{ steps.version.outputs.version }}-bin-macos-x64.tar.gz
+          name: vecBox-bin-macos-x64.tar.gz

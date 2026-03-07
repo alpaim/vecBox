@@ -1,0 +1,23 @@
+name: "Linux - Setup CUDA Toolkit"
+description: "Setup CUDA Toolkit for Linux"
+inputs:
+  cuda_version:
+    description: "CUDA toolkit version"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install CUDA Toolkit 12.4
+      if: ${{ inputs.cuda_version == '12.4' }}
+      shell: bash
+      run: |
+        wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+        sudo dpkg -i cuda-keyring_1.1-1_all.deb
+        sudo apt-get update
+        sudo apt-get install -y cuda-toolkit-12-4
+        echo "/usr/local/cuda-12.4/bin" >> $GITHUB_PATH
+        echo "/usr/local/cuda-12.4/lib64" >> $GITHUB_PATH
+        echo "/usr/local/cuda-12.4/lib" >> $GITHUB_PATH
+        echo "CUDA_PATH=/usr/local/cuda-12.4" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:/usr/local/cuda-12.4/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV

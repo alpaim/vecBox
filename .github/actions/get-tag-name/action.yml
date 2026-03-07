@@ -1,0 +1,30 @@
+name: "Determine tag name"
+description: "Determine the tag name to use for a release"
+outputs:
+  name:
+    description: "The name of the tag"
+    value: ${{ steps.tag.outputs.name }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Determine tag name
+      id: tag
+      shell: bash
+      run: |
+        BUILD_NUMBER="$(git rev-list --count HEAD)"
+        SHORT_HASH="$(git rev-parse --short=7 HEAD)"
+        
+        # Check if this is a tag push (for release workflow)
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          # Extract tag name without refs/tags/ prefix
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          echo "name=${TAG_NAME}" >> $GITHUB_OUTPUT
+        elif [[ "${{ env.BRANCH_NAME }}" == "main" ]]; then
+          # Main branch - use build number
+          echo "name=v${BUILD_NUMBER}" >> $GITHUB_OUTPUT
+        else
+          # Other branches - use branch name + build number + short hash
+          SAFE_NAME=$(echo "${{ env.BRANCH_NAME }}" | tr '/' '-')
+          echo "name=${SAFE_NAME}-b${BUILD_NUMBER}-${SHORT_HASH}" >> $GITHUB_OUTPUT
+        fi

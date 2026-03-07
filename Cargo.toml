@@ -15,6 +15,7 @@ mkl = ["dep:intel-mkl-src", "candle-core/mkl", "candle-nn/mkl"]
 anyhow = { version = "1" }
 
 image = { version = "0.25.2"}
+fast_image_resize = { version = "6.0.0"}
 
 serde_json = { version = "1" }
 serde = { version = "1", features = ["derive"] }

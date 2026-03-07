@@ -3950,11 +3950,13 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 name = "vecBox"
 version = "0.1.0"
 dependencies = [
+ "accelerate-src",
  "anyhow",
  "candle-core",
  "candle-nn",
  "hf-hub",
  "image",
+ "intel-mkl-src",
  "safetensors 0.4.5",
  "serde",
  "serde_json",

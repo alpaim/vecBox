@@ -36,7 +36,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release --features mkl --target x86_64-unknown-linux-gnu
+          cargo build --release --target x86_64-unknown-linux-gnu
 
       - name: Get version info
         id: version

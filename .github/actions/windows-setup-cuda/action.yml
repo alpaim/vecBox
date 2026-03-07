@@ -26,31 +26,31 @@ runs:
           # Change to temp directory
           Set-Location $tempDir
           
-          # Core CUDA components
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_cudart.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.4.131-archive.zip" -OutFile "cuda_nvcc.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_nvrtc.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_nvtx.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_profiler_api.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-12.4.127-archive.zip" -OutFile "visual_studio_integration.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvprof/windows-x86_64/cuda_nvprof-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_nvprof.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_cccl.zip"
+          # Core CUDA components (version 12.4.99)
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.99-archive.zip" -OutFile "cuda_cudart.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.4.99-archive.zip" -OutFile "cuda_nvcc.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.99-archive.zip" -OutFile "cuda_nvrtc.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.4.99-archive.zip" -OutFile "cuda_nvtx.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.4.99-archive.zip" -OutFile "cuda_profiler_api.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-12.4.99-archive.zip" -OutFile "visual_studio_integration.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvprof/windows-x86_64/cuda_nvprof-windows-x86_64-12.4.99-archive.zip" -OutFile "cuda_nvprof.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.4.99-archive.zip" -OutFile "cuda_cccl.zip"
           
-          # BLAS libraries
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip" -OutFile "libcublas.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcublasLt/windows-x86_64/libcublasLt-windows-x86_64-12.4.2.3-archive.zip" -OutFile "libcublasLt.zip"
+          # BLAS libraries (libcublas version 12.4.2.65)
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.2.65-archive.zip" -OutFile "libcublas.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.2.65-archive.zip" -OutFile "libcublasLt.zip"
           
-          # Random number generation
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/curand/windows-x86_64/curand-windows-x86_64-10.3.93.1-archive.zip" -OutFile "curand.zip"
+          # Random number generation (libcurand version 10.3.5.119)
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.5.119-archive.zip" -OutFile "libcurand.zip"
           
-          # Linear algebra solver
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cusolver/windows-x86_64/cusolver-windows-x86_64-11.4.1.5-archive.zip" -OutFile "cusolver.zip"
+          # Linear algebra solver (libcusolver version 11.6.0.99)
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcusolver/windows-x86_64/libcusolver-windows-x86_64-11.6.0.99-archive.zip" -OutFile "libcusolver.zip"
           
-          # FFT library
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cufft/windows-x86_64/cufft-windows-x86_64-10.3.93.1-archive.zip" -OutFile "cufft.zip"
+          # FFT library (libcufft version 11.2.0.44)
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-11.2.0.44-archive.zip" -OutFile "libcufft.zip"
           
-          # JPEG decoding
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/nvjpeg/windows-x86_64/nvjpeg-windows-x86_64-12.4.0.3-archive.zip" -OutFile "nvjpeg.zip"
+          # JPEG decoding (libnvjpeg version 12.3.1.89)
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libnvjpeg/windows-x86_64/libnvjpeg-windows-x86_64-12.3.1.89-archive.zip" -OutFile "libnvjpeg.zip"
           
           # Verify downloads
           $zipCount = (Get-ChildItem -Filter "*.zip" | Measure-Object).Count

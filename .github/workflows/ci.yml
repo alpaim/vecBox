@@ -1,9 +1,9 @@
-name: Release
+name: CI
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -38,19 +38,21 @@ jobs:
         run: |
           cargo build --release --features mkl --target x86_64-unknown-linux-gnu
 
-      - name: Determine tag name
-        id: tag
-        uses: ./.github/actions/get-tag-name
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "version=${SHORT_HASH}" >> $GITHUB_OUTPUT
 
       - name: Pack artifacts
         run: |
           mkdir -p release
-          tar -czvf vecBox-${{ steps.tag.outputs.name }}-bin-linux-cpu-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vecBox
+          tar -czvf vecBox-${{ steps.version.outputs.version }}-bin-linux-cpu-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vecBox
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          path: vecBox-${{ steps.tag.outputs.name }}-bin-linux-cpu-x86_64.tar.gz
+          path: vecBox-${{ steps.version.outputs.version }}-bin-linux-cpu-x86_64.tar.gz
           name: vecBox-bin-linux-cpu-x86_64.tar.gz
 
   linux-cuda-x64:
@@ -81,19 +83,21 @@ jobs:
         run: |
           cargo build --release --features cuda --target x86_64-unknown-linux-gnu
 
-      - name: Determine tag name
-        id: tag
-        uses: ./.github/actions/get-tag-name
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "version=${SHORT_HASH}" >> $GITHUB_OUTPUT
 
       - name: Pack artifacts
         run: |
           mkdir -p release
-          tar -czvf vecBox-${{ steps.tag.outputs.name }}-bin-linux-cuda-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vecBox
+          tar -czvf vecBox-${{ steps.version.outputs.version }}-bin-linux-cuda-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vecBox
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          path: vecBox-${{ steps.tag.outputs.name }}-bin-linux-cuda-x86_64.tar.gz
+          path: vecBox-${{ steps.version.outputs.version }}-bin-linux-cuda-x86_64.tar.gz
           name: vecBox-bin-linux-cuda-x86_64.tar.gz
 
   windows-cpu-x64:
@@ -114,19 +118,22 @@ jobs:
         run: |
           cargo build --release --features mkl --target x86_64-pc-windows-msvc
 
-      - name: Determine tag name
-        id: tag
-        uses: ./.github/actions/get-tag-name
+      - name: Get version info
+        id: version
+        shell: pwsh
+        run: |
+          $shortHash = git rev-parse --short=7 HEAD
+          echo "version=$shortHash" >> $env:GITHUB_OUTPUT
 
       - name: Pack artifacts
         shell: pwsh
         run: |
-          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/vecBox.exe -DestinationPath vecBox-${{ steps.tag.outputs.name }}-bin-win-cpu-x64.zip
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/vecBox.exe -DestinationPath vecBox-${{ steps.version.outputs.version }}-bin-win-cpu-x64.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          path: vecBox-${{ steps.tag.outputs.name }}-bin-win-cpu-x64.zip
+          path: vecBox-${{ steps.version.outputs.version }}-bin-win-cpu-x64.zip
           name: vecBox-bin-win-cpu-x64.zip
 
   windows-cuda-x64:
@@ -161,19 +168,22 @@ jobs:
           set PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin;%PATH%
           cargo build --release --features cuda --target x86_64-pc-windows-msvc
 
-      - name: Determine tag name
-        id: tag
-        uses: ./.github/actions/get-tag-name
+      - name: Get version info
+        id: version
+        shell: pwsh
+        run: |
+          $shortHash = git rev-parse --short=7 HEAD
+          echo "version=$shortHash" >> $env:GITHUB_OUTPUT
 
       - name: Pack artifacts
         shell: pwsh
         run: |
-          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/vecBox.exe -DestinationPath vecBox-${{ steps.tag.outputs.name }}-bin-win-cuda-x64.zip
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/vecBox.exe -DestinationPath vecBox-${{ steps.version.outputs.version }}-bin-win-cuda-x64.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          path: vecBox-${{ steps.tag.outputs.name }}-bin-win-cuda-x64.zip
+          path: vecBox-${{ steps.version.outputs.version }}-bin-win-cuda-x64.zip
           name: vecBox-bin-win-cuda-x64.zip
 
   macos-arm64:
@@ -194,19 +204,21 @@ jobs:
         run: |
           cargo build --release --features metal --target aarch64-apple-darwin
 
-      - name: Determine tag name
-        id: tag
-        uses: ./.github/actions/get-tag-name
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "version=${SHORT_HASH}" >> $GITHUB_OUTPUT
 
       - name: Pack artifacts
         run: |
           mkdir -p release
-          tar -czvf vecBox-${{ steps.tag.outputs.name }}-bin-macos-arm64.tar.gz -C target/aarch64-apple-darwin/release vecBox
+          tar -czvf vecBox-${{ steps.version.outputs.version }}-bin-macos-arm64.tar.gz -C target/aarch64-apple-darwin/release vecBox
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          path: vecBox-${{ steps.tag.outputs.name }}-bin-macos-arm64.tar.gz
+          path: vecBox-${{ steps.version.outputs.version }}-bin-macos-arm64.tar.gz
           name: vecBox-bin-macos-arm64.tar.gz
 
   macos-x64:
@@ -227,82 +239,19 @@ jobs:
         run: |
           cargo build --release --features accelerate --target x86_64-apple-darwin
 
-      - name: Determine tag name
-        id: tag
-        uses: ./.github/actions/get-tag-name
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "version=${SHORT_HASH}" >> $GITHUB_OUTPUT
 
       - name: Pack artifacts
         run: |
           mkdir -p release
-          tar -czvf vecBox-${{ steps.tag.outputs.name }}-bin-macos-x64.tar.gz -C target/x86_64-apple-darwin/release vecBox
+          tar -czvf vecBox-${{ steps.version.outputs.version }}-bin-macos-x64.tar.gz -C target/x86_64-apple-darwin/release vecBox
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          path: vecBox-${{ steps.tag.outputs.name }}-bin-macos-x64.tar.gz
+          path: vecBox-${{ steps.version.outputs.version }}-bin-macos-x64.tar.gz
           name: vecBox-bin-macos-x64.tar.gz
-
-  release:
-    if: github.ref_type == 'tag'
-
-    permissions:
-      contents: write
-
-    runs-on: ubuntu-latest
-
-    needs:
-      - linux-cpu-x64
-      - linux-cuda-x64
-      - windows-cpu-x64
-      - windows-cuda-x64
-      - macos-arm64
-      - macos-x64
-
-    steps:
-      - name: Clone
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get version from Cargo.toml
-        id: version
-        run: |
-          VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "//;s/"//')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Determine tag name
-        id: tag
-        uses: ./.github/actions/get-tag-name
-
-      - name: Validate version matches tag
-        run: |
-          TAG_VERSION="v${{ steps.version.outputs.version }}"
-          if [[ "${{ steps.tag.outputs.name }}" != "$TAG_VERSION"* ]]; then
-            echo "Error: Tag name '${{ steps.tag.outputs.name }}' does not match version 'v${{ steps.version.outputs.version }}'"
-            exit 1
-          fi
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./artifact
-          merge-multiple: true
-
-      - name: Move artifacts
-        run: |
-          mkdir -p release
-          mv -v artifact/*.tar.gz release/
-          mv -v artifact/*.zip release/
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: Release ${{ steps.tag.outputs.name }}
-          generate_release_notes: true
-          latest: true
-          files: |
-            release/*.tar.gz
-            release/*.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

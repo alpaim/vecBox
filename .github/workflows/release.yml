@@ -171,9 +171,6 @@ jobs:
           Write-Host "nvcc version:"
           & nvcc --version
           
-          # Call vcvarsall.bat for Visual Studio
-          & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
-          
           # Run cargo build
           cargo build --release --features cuda --target x86_64-pc-windows-msvc
 

@@ -38,7 +38,6 @@ runs:
           
           # BLAS libraries (libcublas version 12.4.2.65)
           Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.2.65-archive.zip" -OutFile "libcublas.zip"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.2.65-archive.zip" -OutFile "libcublasLt.zip"
           
           # Random number generation (libcurand version 10.3.5.119)
           Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.5.119-archive.zip" -OutFile "libcurand.zip"
@@ -63,15 +62,11 @@ runs:
               Expand-Archive -Path $_.FullName -DestinationPath $cudaDir -Force 
           }
           
-          # Find and move all contents from archive folders to root
-          Get-ChildItem -Path $cudaDir -Directory | ForEach-Object {
+          # Move all contents from archive folders to root while preserving directory structure
+          Get-ChildItem -Path $cudaDir -Directory | Where-Object Name -like "*-archive" | ForEach-Object {
               $archiveDir = $_.FullName
-              Get-ChildItem -Path $archiveDir -Recurse -File | ForEach-Object {
-                  $dest = Join-Path $cudaDir $_.Name
-                  if (-not (Test-Path $dest)) {
-                      Move-Item -Path $_.FullName -Destination $cudaDir -Force
-                  }
-              }
+              Copy-Item -Path "$archiveDir\*" -Destination $cudaDir -Recurse -Force
+              Remove-Item -Path $archiveDir -Recurse -Force
           }
           
           # Add to PATH

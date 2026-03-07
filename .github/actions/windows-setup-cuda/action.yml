@@ -12,53 +12,77 @@ runs:
       if: ${{ inputs.cuda_version == '12.4' }}
       shell: pwsh
       run: |
-          mkdir -p "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+          # Create temp directory for downloads
+          $tempDir = "C:\temp\cuda"
+          New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+          
+          # Create CUDA installation directory
+          $cudaDir = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+          New-Item -ItemType Directory -Force -Path $cudaDir | Out-Null
+          
+          # Install unzip if needed
           choco install unzip -y
           
+          # Change to temp directory
+          Set-Location $tempDir
+          
           # Core CUDA components
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip"
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.4.131-archive.zip"
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.127-archive.zip"
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.4.127-archive.zip"
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.4.127-archive.zip"
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-12.4.127-archive.zip"
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvprof/windows-x86_64/cuda_nvprof-windows-x86_64-12.4.127-archive.zip"
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.4.127-archive.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_cudart.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.4.131-archive.zip" -OutFile "cuda_nvcc.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_nvrtc.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_nvtx.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_profiler_api.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-12.4.127-archive.zip" -OutFile "visual_studio_integration.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvprof/windows-x86_64/cuda_nvprof-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_nvprof.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.4.127-archive.zip" -OutFile "cuda_cccl.zip"
           
-          # BLAS libraries (NEW - was missing!)
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip"
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/libcublasLt/windows-x86_64/libcublasLt-windows-x86_64-12.4.2.3-archive.zip"
+          # BLAS libraries
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip" -OutFile "libcublas.zip"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/libcublasLt/windows-x86_64/libcublasLt-windows-x86_64-12.4.2.3-archive.zip" -OutFile "libcublasLt.zip"
           
-          # Random number generation (NEW - was missing!)
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/curand/windows-x86_64/curand-windows-x86_64-10.3.93.1-archive.zip"
+          # Random number generation
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/curand/windows-x86_64/curand-windows-x86_64-10.3.93.1-archive.zip" -OutFile "curand.zip"
           
-          # Linear algebra solver (NEW - was missing!)
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cusolver/windows-x86_64/cusolver-windows-x86_64-11.4.1.5-archive.zip"
+          # Linear algebra solver
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cusolver/windows-x86_64/cusolver-windows-x86_64-11.4.1.5-archive.zip" -OutFile "cusolver.zip"
           
-          # FFT library (NEW - was missing!)
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/cufft/windows-x86_64/cufft-windows-x86_64-10.3.93.1-archive.zip"
+          # FFT library
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cufft/windows-x86_64/cufft-windows-x86_64-10.3.93.1-archive.zip" -OutFile "cufft.zip"
           
-          # JPEG decoding (NEW - was missing!)
-          curl -sL -O "https://developer.download.nvidia.com/compute/cuda/redist/nvjpeg/windows-x86_64/nvjpeg-windows-x86_64-12.4.0.3-archive.zip"
+          # JPEG decoding
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/nvjpeg/windows-x86_64/nvjpeg-windows-x86_64-12.4.0.3-archive.zip" -OutFile "nvjpeg.zip"
           
-          # Extract all
-          Get-ChildItem -Filter "*.zip" | ForEach-Object { Expand-Archive -Path $_.FullName -DestinationPath "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" -Force }
+          # Verify downloads
+          $zipCount = (Get-ChildItem -Filter "*.zip" | Measure-Object).Count
+          if ($zipCount -eq 0) { throw "No zip files downloaded!" }
+          Write-Host "Downloaded $zipCount zip files successfully"
+          
+          # Extract all zip files to CUDA directory
+          Get-ChildItem -Filter "*.zip" | ForEach-Object { 
+              Write-Host "Extracting $($_.Name)..."
+              Expand-Archive -Path $_.FullName -DestinationPath $cudaDir -Force 
+          }
           
           # Find and move all contents from archive folders to root
-          Get-ChildItem -Path "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" -Directory | ForEach-Object {
+          Get-ChildItem -Path $cudaDir -Directory | ForEach-Object {
               $archiveDir = $_.FullName
               Get-ChildItem -Path $archiveDir -Recurse -File | ForEach-Object {
-                  $dest = Join-Path "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" $_.Name
+                  $dest = Join-Path $cudaDir $_.Name
                   if (-not (Test-Path $dest)) {
-                      Move-Item -Path $_.FullName -Destination "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" -Force
+                      Move-Item -Path $_.FullName -Destination $cudaDir -Force
                   }
               }
           }
           
           # Add to PATH
-          "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\lib\x64" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$cudaDir\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$cudaDir\lib\x64" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           
           # Set environment variables
-          "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CUDA_PATH_V12_4=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CUDA_PATH=$cudaDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CUDA_PATH_V12_4=$cudaDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          
+          # Cleanup temp directory
+          Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "CUDA Toolkit 12.4 installation completed!"

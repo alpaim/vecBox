@@ -700,10 +700,10 @@ impl Module for Qwen3RMSNorm {
         let in_dtype = xs.dtype();
         let dev = xs.device();
 
-        let xs_f = xs.to_dtype(DType::F32)?;
+        let xs_f = xs.to_dtype(in_dtype)?;
         let var = xs_f.powf(2.0)?.mean_keepdim(D::Minus1)?; // [..., 1]
 
-        let eps_t = scalar_f64_as_f32(dev, self.eps)?;
+        let eps_t = Tensor::new(self.eps as f32, dev)?.to_dtype(in_dtype)?;
         let var_eps = var.broadcast_add(&eps_t)?;
 
         // xs * rsqrt(var + eps)  == xs * (1/sqrt(...))
@@ -803,7 +803,7 @@ impl Qwen3RotaryEmbedding {
     /// returns (cos, sin): [B,T,dim] in xs.dtype()
     pub fn forward(&self, xs: &Tensor, position_ids: &Tensor) -> Result<(Tensor, Tensor)> {
         let dev = xs.device();
-        let inv_freq = self.inv_freq.to_device(dev)?.to_dtype(DType::F32)?;
+        let inv_freq = self.inv_freq.to_device(dev)?.to_dtype(xs.dtype())?;
         let d2 = inv_freq.dims1()?;
 
         let freqs = if position_ids.rank() == 2 {
@@ -865,9 +865,9 @@ impl Qwen3RotaryEmbedding {
         // emb = cat(freqs, freqs) -> [B,T,dim]
         let emb = Tensor::cat(&[&freqs, &freqs], 2)?;
 
-        let scale = scalar_f32(dev, self.attention_factor)?;
-        let cos = emb.cos()?.broadcast_mul(&scale)?;
-        let sin = emb.sin()?.broadcast_mul(&scale)?;
+        let scale = Tensor::new(self.attention_factor, dev)?.to_dtype(xs.dtype())?;
+        let cos = emb.cos()?.to_dtype(xs.dtype())?.broadcast_mul(&scale)?;
+        let sin = emb.sin()?.to_dtype(xs.dtype())?.broadcast_mul(&scale)?;
 
         let out_dtype = xs.dtype();
         Ok((cos.to_dtype(out_dtype)?, sin.to_dtype(out_dtype)?))

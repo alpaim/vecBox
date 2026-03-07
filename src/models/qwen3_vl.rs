@@ -280,11 +280,11 @@ impl VisionAttention {
         let mut k = qkv.i(1)?.squeeze(0)?;
         let mut v = qkv.i(2)?.squeeze(0)?;
 
-        let cos = cos.to_dtype(DType::F32)?;
-        let sin = sin.to_dtype(DType::F32)?;
-        q = q.to_dtype(DType::F32)?;
-        k = k.to_dtype(DType::F32)?;
-        v = v.to_dtype(DType::F32)?;
+        let cos = cos.to_dtype(xs.dtype())?;
+        let sin = sin.to_dtype(xs.dtype())?;
+        q = q.to_dtype(xs.dtype())?;
+        k = k.to_dtype(xs.dtype())?;
+        v = v.to_dtype(xs.dtype())?;
         (q, k) = apply_rotary_pos_emb_vision(&q, &k, &cos, &sin)?;
 
         let mut outputs = Vec::new();
@@ -720,8 +720,8 @@ impl Qwen3VLVisionModel {
         let seq_len = hidden_states.dim(0)?;
         let rotary_pos_emb = rotary_pos_emb.reshape((seq_len, ()))?;
         let emb = Tensor::cat(&[&rotary_pos_emb, &rotary_pos_emb], D::Minus1)?;
-        let cos = emb.cos()?.to_dtype(DType::F32)?;
-        let sin = emb.sin()?.to_dtype(DType::F32)?;
+        let cos = emb.cos()?.to_dtype(xs.dtype())?;
+        let sin = emb.sin()?.to_dtype(xs.dtype())?;
 
         let cu_seqlens = self.build_cu_seqlens(grid_thw)?;
 

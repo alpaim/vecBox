@@ -19,19 +19,19 @@ fn default_in_channels() -> usize {
 }
 
 fn default_depth() -> usize {
-    32
+    24
 }
 
 fn default_hidden_size() -> usize {
-    3584
+    1024
 }
 
 fn default_out_hidden_size() -> usize {
-    3584
+    2048
 }
 
 fn default_intermediate_size() -> usize {
-    3420
+    4096
 }
 
 fn default_num_heads() -> usize {
@@ -39,7 +39,7 @@ fn default_num_heads() -> usize {
 }
 
 fn default_patch_size() -> usize {
-    14
+    16
 }
 
 fn default_spatial_merge_size() -> usize {
@@ -51,11 +51,11 @@ fn default_temporal_patch_size() -> usize {
 }
 
 fn default_num_position_embeddings() -> usize {
-    576
+    2304
 }
 
 fn default_deepstack_visual_indexes() -> Vec<usize> {
-    Vec::new()
+    vec![5, 11, 17]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,7 +72,7 @@ pub struct VisionConfig {
     pub intermediate_size: usize,
     #[serde(default = "default_num_heads")]
     pub num_heads: usize,
-    #[serde(default = "default_in_channels")]
+    #[serde(default = "default_in_channels", rename = "in_channels")]
     pub in_chans: usize,
     #[serde(default = "default_patch_size")]
     pub patch_size: usize,
@@ -287,6 +287,8 @@ impl VisionAttention {
         v = v.to_dtype(DType::F32)?;
         (q, k) = apply_rotary_pos_emb_vision(&q, &k, &cos, &sin)?;
 
+        let scale = (self.head_dim as f32).powf(-0.5);
+
         let mut outputs = Vec::new();
         for window in cu_seqlens.windows(2) {
             let start = window[0];
@@ -295,24 +297,27 @@ impl VisionAttention {
                 continue;
             }
             let len = end - start;
+
             let q_chunk = q.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
             let k_chunk = k.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
             let v_chunk = v.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
 
-            let mut chunk_out = {
-                let q = q_chunk.unsqueeze(0)?;
-                let k = k_chunk.unsqueeze(0)?;
-                let v = v_chunk.unsqueeze(0)?;
+            let q_chunk = q_chunk.unsqueeze(0)?;
+            let k_chunk = k_chunk.unsqueeze(0)?;
+            let v_chunk = v_chunk.unsqueeze(0)?;
 
-                let attn_weights =
-                    (q.matmul(&k.transpose(2, 3)?)? / (self.head_dim as f64).sqrt())?;
-                let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-                attn_weights.matmul(&v)?
-            };
-            chunk_out = chunk_out.squeeze(0)?.transpose(0, 1)?;
+            let chunk_out = candle_nn::ops::sdpa(
+                &q_chunk,
+                &k_chunk,
+                &v_chunk,
+                None,
+                false,
+                scale,
+                1.0,
+            )?;
 
-            chunk_out.device().synchronize()?;
-            chunk_out = chunk_out.reshape((len, self.num_heads * self.head_dim))?;
+            let chunk_out = chunk_out.squeeze(0)?.transpose(0, 1)?;
+            let chunk_out = chunk_out.reshape((len, self.num_heads * self.head_dim))?;
             outputs.push(chunk_out.to_dtype(xs.dtype())?);
         }
         let attn_output = Tensor::cat(&outputs, 0)?;
@@ -357,11 +362,16 @@ impl VisionBlock {
         cos: &Tensor,
         sin: &Tensor,
     ) -> Result<Tensor> {
+        let input_dtype = xs.dtype();
+        
         let normed = self.norm1.forward(xs)?;
         let attn_out = self.attn.forward(&normed, cu_seqlens, cos, sin)?;
         let xs_att = xs.add(&attn_out)?;
-        let mlp_out = self.mlp.forward(&self.norm2.forward(&xs_att)?)?;
-        xs_att.add(&mlp_out)
+        
+        let normed2 = self.norm2.forward(&xs_att)?.to_dtype(input_dtype)?;
+        let mlp_out = self.mlp.forward(&normed2)?;
+        
+        xs_att.add(&mlp_out)?.to_dtype(input_dtype)
     }
 }
 

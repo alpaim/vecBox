@@ -29,7 +29,7 @@ pub fn get_device() -> anyhow::Result<Device> {
 pub fn get_device_dtype(device: &Device) -> anyhow::Result<DType> {
     match device {
         Device::Cpu => Ok(DType::F32), // F32 is better for CPU
-        Device::Metal(_) => Ok(DType::F16),
+        Device::Metal(_) => Ok(DType::BF16),
         Device::Cuda(_) => Ok(DType::BF16), // Not sure how to better manage F16 (up to RTX3000) and BF16
     }
 }

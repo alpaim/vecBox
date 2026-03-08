@@ -1114,9 +1114,10 @@ impl Qwen3Attention {
         let k = repeat_kv(&k, self.num_kv_groups)?;
         let v = repeat_kv(&v, self.num_kv_groups)?;
 
-        // Use SDPA for CUDA/Metal, eager attention for CPU
-        let is_cuda = q.device().is_cuda();
-        let out = if is_cuda {
+        // Use SDPA for Metal only, eager attention for CPU/CUDA
+        // Note: candle_nn::ops::sdpa is Metal-only, not available for CUDA
+        let is_metal = q.device().is_metal();
+        let out = if is_metal {
             let mask = if let Some(mask) = attention_mask {
                 Some(mask.broadcast_as((b, self.num_heads, t, t))?)
             } else {
@@ -1124,7 +1125,7 @@ impl Qwen3Attention {
             };
             candle_nn::ops::sdpa(&q, &k, &v, mask.as_ref(), false, self.scaling, 1.0)?
         } else {
-            // Use eager attention for CPU
+            // Use eager attention for CPU and CUDA (SDPA is Metal-only in Candle)
             let mask = if let Some(mask) = attention_mask {
                 Some(mask.broadcast_as((b, self.num_heads, t, t))?)
             } else {
@@ -2307,26 +2308,6 @@ impl Qwen3VLEmbedding {
         normalized.to_vec2::<f32>()
     }
 
-    /// Set max_pixels for image preprocessing (affects image resolution)
-    pub fn set_max_pixels(&mut self, max_pixels: usize) {
-        self.preprocessor.max_pixels = max_pixels;
-    }
-
-    /// Set min_pixels for image preprocessing
-    pub fn set_min_pixels(&mut self, min_pixels: usize) {
-        self.preprocessor.min_pixels = min_pixels;
-    }
-
-    /// Get current max_pixels setting
-    pub fn max_pixels(&self) -> usize {
-        self.preprocessor.max_pixels
-    }
-
-    /// Get current min_pixels setting
-    pub fn min_pixels(&self) -> usize {
-        self.preprocessor.min_pixels
-    }
-
     fn embed_internal(
         &self,
         texts: Vec<Option<String>>,
@@ -2360,8 +2341,8 @@ impl Qwen3VLEmbedding {
 
         self.run_inference_on_prepared(prompts, prepared_inputs)
     }
-
 }
+
 #[cfg(test)]
 mod tests {
     use super::{

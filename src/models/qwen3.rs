@@ -993,7 +993,7 @@ fn eager_attention_forward(
     scaling: f32,
 ) -> Result<Tensor> {
     let attn_weights = q.matmul(&k.transpose(D::Minus2, D::Minus1)?)?;
-    let scale_tensor = Tensor::new(scaling, q.device())?;
+    let scale_tensor = Tensor::new(scaling, q.device())?.to_dtype(q.dtype())?;
     let attn_weights = attn_weights.broadcast_mul(&scale_tensor)?;
     let attn_weights = match attention_mask {
         None => attn_weights,

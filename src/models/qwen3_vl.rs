@@ -249,7 +249,7 @@ fn apply_rotary_pos_emb_vision(
 
 fn eager_attention_forward(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
     let attn_weights = q.matmul(&k.transpose(D::Minus2, D::Minus1)?)?;
-    let scale_tensor = Tensor::new(scale, q.device())?;
+    let scale_tensor = Tensor::new(scale, q.device())?.to_dtype(q.dtype())?;
     let attn_weights = attn_weights.broadcast_mul(&scale_tensor)?;
     let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(DType::F32)?)?
         .to_dtype(attn_weights.dtype())?;

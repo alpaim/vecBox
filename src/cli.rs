@@ -60,4 +60,13 @@ pub struct ImageEmbeddingArgs {
 
     #[arg(long, help = "Instruction text or path to instruction file")]
     pub instruction: Option<String>,
+
+    #[arg(
+        long,
+        help = "Maximum pixels for image resizing (e.g., 786432 for 768x1024)"
+    )]
+    pub max_pixels: Option<usize>,
+
+    #[arg(long, help = "Minimum pixels for image resizing")]
+    pub min_pixels: Option<usize>,
 }

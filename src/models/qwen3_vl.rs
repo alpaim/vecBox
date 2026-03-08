@@ -321,7 +321,7 @@ impl VisionAttention {
             let chunk_out = chunk_out.reshape((len, self.num_heads * self.head_dim))?;
             outputs.push(chunk_out);
         }
-        let attn_output = Tensor::cat(&outputs, 0)?;
+        let attn_output = Tensor::cat(&outputs, 0)?.to_dtype(xs.dtype())?;
         self.proj.forward(&attn_output)
     }
 }

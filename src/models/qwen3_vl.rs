@@ -247,6 +247,15 @@ fn apply_rotary_pos_emb_vision(
     Ok((q_embed, k_embed))
 }
 
+fn eager_attention_forward(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+    let attn_weights = q.matmul(&k.transpose(D::Minus2, D::Minus1)?)?;
+    let scale_tensor = Tensor::new(scale, q.device())?;
+    let attn_weights = attn_weights.broadcast_mul(&scale_tensor)?;
+    let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(DType::F32)?)?
+        .to_dtype(attn_weights.dtype())?;
+    attn_weights.matmul(v)
+}
+
 struct VisionAttention {
     qkv: Linear,
     proj: Linear,
@@ -276,16 +285,16 @@ impl VisionAttention {
         let qkv = hidden_states
             .reshape((seq_len, 3, self.num_heads, self.head_dim))?
             .permute((1, 0, 2, 3))?;
-        let mut q = qkv.i(0)?.squeeze(0)?;
-        let mut k = qkv.i(1)?.squeeze(0)?;
-        let mut v = qkv.i(2)?.squeeze(0)?;
+        let q = qkv.i(0)?.squeeze(0)?;
+        let k = qkv.i(1)?.squeeze(0)?;
+        let v = qkv.i(2)?.squeeze(0)?;
 
         let cos = cos.to_dtype(DType::F32)?;
         let sin = sin.to_dtype(DType::F32)?;
-        q = q.to_dtype(DType::F32)?;
-        k = k.to_dtype(DType::F32)?;
-        v = v.to_dtype(DType::F32)?;
-        (q, k) = apply_rotary_pos_emb_vision(&q, &k, &cos, &sin)?;
+        let q = q.to_dtype(DType::F32)?;
+        let k = k.to_dtype(DType::F32)?;
+        let v = v.to_dtype(DType::F32)?;
+        let (q, k) = apply_rotary_pos_emb_vision(&q, &k, &cos, &sin)?;
 
         let scale = (self.head_dim as f32).powf(-0.5);
 
@@ -306,19 +315,11 @@ impl VisionAttention {
             let k_chunk = k_chunk.unsqueeze(0)?;
             let v_chunk = v_chunk.unsqueeze(0)?;
 
-            let chunk_out = candle_nn::ops::sdpa(
-                &q_chunk,
-                &k_chunk,
-                &v_chunk,
-                None,
-                false,
-                scale,
-                1.0,
-            )?;
+            let chunk_out = eager_attention_forward(&q_chunk, &k_chunk, &v_chunk, scale)?;
 
             let chunk_out = chunk_out.squeeze(0)?.transpose(0, 1)?;
             let chunk_out = chunk_out.reshape((len, self.num_heads * self.head_dim))?;
-            outputs.push(chunk_out.to_dtype(xs.dtype())?);
+            outputs.push(chunk_out);
         }
         let attn_output = Tensor::cat(&outputs, 0)?;
         self.proj.forward(&attn_output)
@@ -362,16 +363,14 @@ impl VisionBlock {
         cos: &Tensor,
         sin: &Tensor,
     ) -> Result<Tensor> {
-        let input_dtype = xs.dtype();
-        
         let normed = self.norm1.forward(xs)?;
         let attn_out = self.attn.forward(&normed, cu_seqlens, cos, sin)?;
         let xs_att = xs.add(&attn_out)?;
-        
-        let normed2 = self.norm2.forward(&xs_att)?.to_dtype(input_dtype)?;
+
+        let normed2 = self.norm2.forward(&xs_att)?;
         let mlp_out = self.mlp.forward(&normed2)?;
-        
-        xs_att.add(&mlp_out)?.to_dtype(input_dtype)
+
+        xs_att.add(&mlp_out)
     }
 }
 

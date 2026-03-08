@@ -7,10 +7,10 @@ extern crate intel_mkl_src;
 #[cfg(feature = "accelerate")]
 extern crate accelerate_src;
 
-use candle_core::quantized::{QMatMul, gguf_file};
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{Activation, Linear, Module, VarBuilder, linear, linear_no_bias};
-use image::{DynamicImage, imageops::FilterType};
+use candle_core::quantized::{gguf_file, QMatMul};
+use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_nn::{linear, linear_no_bias, Activation, Linear, Module, VarBuilder};
+use image::{imageops::FilterType, DynamicImage};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -213,10 +213,10 @@ fn build_attention_mask_4d(attention_mask_2d: &Tensor) -> Result<Tensor> {
 
     let pad_mask_f32 = attention_mask_2d.to_dtype(DType::F32)?;
     let ones = Tensor::ones_like(&pad_mask_f32)?;
-    let inverted_mask = ones.sub(&pad_mask_f32)?; 
-    
+    let inverted_mask = ones.sub(&pad_mask_f32)?;
+
     let mask_val_t = Tensor::new(&[mask_value], device)?;
-    let pad_additive = inverted_mask.broadcast_mul(&mask_val_t)?; 
+    let pad_additive = inverted_mask.broadcast_mul(&mask_val_t)?;
 
     let pad_additive = pad_additive.unsqueeze(1)?.unsqueeze(2)?;
 
@@ -378,30 +378,42 @@ fn preprocess_image(img: &DynamicImage, cfg: &Qwen3VLPreprocessorConfig) -> Resu
     }
 
     let channels = 3usize;
-    let patch_dim = channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
+    let patch_size = cfg.patch_size;
+    let temporal_patch_size = cfg.temporal_patch_size;
+    let patch_dim = channels * temporal_patch_size * patch_size * patch_size;
     let total_patch_tokens = grid_t * grid_h * grid_w;
     let total_values = total_patch_tokens * patch_dim;
     let mut out = Vec::with_capacity(total_values);
     out.resize(total_values, 0.0);
 
+    let merged_h = grid_h / merge;
+    let merged_w = grid_w / merge;
+    let patch_size_sq = patch_size * patch_size;
+    let patch_size_times_channels = patch_size_sq * channels;
+
     let mut idx = 0;
     for _t in 0..grid_t {
-        for gh_block in 0..(grid_h / merge) {
-            for gw_block in 0..(grid_w / merge) {
+        for gh_block in 0..merged_h {
+            for gw_block in 0..merged_w {
                 for mh in 0..merge {
                     for mw in 0..merge {
                         let gh = gh_block * merge + mh;
                         let gw = gw_block * merge + mw;
+                        let base_y = gh * patch_size;
+                        let base_x = gw * patch_size;
 
                         for c in 0..channels {
-                            for _tp in 0..cfg.temporal_patch_size {
-                                for ph in 0..cfg.patch_size {
-                                    for pw in 0..cfg.patch_size {
-                                        let y = gh * cfg.patch_size + ph;
-                                        let x = gw * cfg.patch_size + pw;
-                                        let pixel_idx = (y * width + x) * 3 + c;
+                            let scale_c = scale[c];
+                            let offset_c = offset[c];
+                            for _tp in 0..temporal_patch_size {
+                                for ph in 0..patch_size {
+                                    let y = base_y + ph;
+                                    let row_offset = y * width;
+                                    for pw in 0..patch_size {
+                                        let x = base_x + pw;
+                                        let pixel_idx = (row_offset + x) * 3 + c;
                                         let pixel = pixels[pixel_idx] as f32;
-                                        out[idx] = pixel * scale[c] - offset[c];
+                                        out[idx] = pixel * scale_c - offset_c;
                                         idx += 1;
                                     }
                                 }
@@ -489,41 +501,58 @@ fn preprocess_video(
     }
 
     let channels = 3usize;
+    let patch_size = cfg.patch_size;
+    let temporal_patch_size = cfg.temporal_patch_size;
+    let patch_dim = channels * temporal_patch_size * patch_size * patch_size;
 
-    let patch_dim = channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
+    let scale = [
+        cfg.rescale_factor / cfg.image_std[0],
+        cfg.rescale_factor / cfg.image_std[1],
+        cfg.rescale_factor / cfg.image_std[2],
+    ];
+    let offset = [
+        cfg.image_mean[0] / cfg.image_std[0],
+        cfg.image_mean[1] / cfg.image_std[1],
+        cfg.image_mean[2] / cfg.image_std[2],
+    ];
 
     let total_patch_tokens = grid_t * grid_h * grid_w;
     let mut out = Vec::with_capacity(total_patch_tokens * patch_dim);
 
+    let merged_h = grid_h / merge;
+    let merged_w = grid_w / merge;
+
     for t_block in 0..grid_t {
-        for gh_block in 0..(grid_h / merge) {
-            for gw_block in 0..(grid_w / merge) {
+        for gh_block in 0..merged_h {
+            for gw_block in 0..merged_w {
                 for mh in 0..merge {
                     for mw in 0..merge {
                         let gh = gh_block * merge + mh;
                         let gw = gw_block * merge + mw;
+                        let base_y = gh * patch_size;
+                        let base_x = gw * patch_size;
 
                         for c in 0..channels {
-                            for tp in 0..cfg.temporal_patch_size {
-                                let frame_idx = t_block * cfg.temporal_patch_size + tp;
+                            let scale_c = scale[c];
+                            let offset_c = offset[c];
+                            for tp in 0..temporal_patch_size {
+                                let frame_idx = t_block * temporal_patch_size + tp;
                                 let frame = &resized_frames[frame_idx];
+                                let frame_width = frame.width() as usize;
+                                let frame_height = frame.height() as usize;
 
-                                for ph in 0..cfg.patch_size {
-                                    for pw in 0..cfg.patch_size {
-                                        let y = gh * cfg.patch_size + ph;
-                                        let x = gw * cfg.patch_size + pw;
+                                for ph in 0..patch_size {
+                                    let y = base_y + ph;
+                                    for pw in 0..patch_size {
+                                        let x = base_x + pw;
 
-                                        let pixel = if x < frame.width() as usize
-                                            && y < frame.height() as usize
-                                        {
+                                        let pixel = if x < frame_width && y < frame_height {
                                             frame.get_pixel(x as u32, y as u32).0[c]
                                         } else {
-                                            0 // Padding
+                                            0
                                         };
 
-                                        let mut value = pixel as f32;
-                                        value *= cfg.rescale_factor;
-                                        value = (value - cfg.image_mean[c]) / cfg.image_std[c];
+                                        let value = (pixel as f32) * scale_c - offset_c;
                                         out.push(value);
                                     }
                                 }
@@ -956,6 +985,25 @@ fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor> {
     x.reshape((b, n_kv * n_rep, t, d))
 }
 
+fn eager_attention_forward(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attention_mask: Option<&Tensor>,
+    scaling: f32,
+) -> Result<Tensor> {
+    let attn_weights = q.matmul(&k.transpose(D::Minus2, D::Minus1)?)?;
+    let scale_tensor = Tensor::new(scaling, q.device())?;
+    let attn_weights = attn_weights.broadcast_mul(&scale_tensor)?;
+    let attn_weights = match attention_mask {
+        None => attn_weights,
+        Some(mask) => attn_weights.broadcast_add(&mask.to_dtype(attn_weights.dtype())?)?,
+    };
+    let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(DType::F32)?)?
+        .to_dtype(attn_weights.dtype())?;
+    attn_weights.matmul(v)
+}
+
 // - q_norm/k_norm on head_dim after reshape
 // - RoPE on q,k
 // - repeat_kv for key/value (GQA)
@@ -1063,28 +1111,27 @@ impl Qwen3Attention {
         let (q, k) = apply_rotary_pos_emb(&q, &k, cos, sin)?;
 
         // GQA expand
-        let k = repeat_kv(&k, self.num_kv_groups)?; // [B,Nh,T,D]
-        let v = repeat_kv(&v, self.num_kv_groups)?; // [B,Nh,T,D]
+        let k = repeat_kv(&k, self.num_kv_groups)?;
+        let v = repeat_kv(&v, self.num_kv_groups)?;
 
-        // Use SDPA for O(n) memory instead of O(n²)
-        // SDPA expects: q,k,v in [B, H, T, D], mask in [B, Qheads, T, T]
-        // Expand mask from [B, 1, T, T] to [B, Nheads, T, T] and convert dtype
-        let mask = if let Some(mask) = attention_mask {
-            let mask = mask.broadcast_as((b, self.num_heads, t, t))?;
-            Some(mask)
+        // Use SDPA for CUDA/Metal, eager attention for CPU
+        let is_cuda = q.device().is_cuda();
+        let out = if is_cuda {
+            let mask = if let Some(mask) = attention_mask {
+                Some(mask.broadcast_as((b, self.num_heads, t, t))?)
+            } else {
+                None
+            };
+            candle_nn::ops::sdpa(&q, &k, &v, mask.as_ref(), false, self.scaling, 1.0)?
         } else {
-            None
+            // Use eager attention for CPU
+            let mask = if let Some(mask) = attention_mask {
+                Some(mask.broadcast_as((b, self.num_heads, t, t))?)
+            } else {
+                None
+            };
+            eager_attention_forward(&q, &k, &v, mask.as_ref(), self.scaling)?
         };
-
-        let out = candle_nn::ops::sdpa(
-            &q,
-            &k,
-            &v,
-            mask.as_ref(),
-            false,
-            self.scaling,
-            1.0,
-        )?;
 
         // transpose back -> [B,T,Nh,D] -> reshape [B,T,Nh*D] -> o_proj -> [B,T,H]
         let out = out.transpose(1, 2)?.reshape((b, t, self.num_heads * d))?;
@@ -1184,7 +1231,6 @@ impl Qwen3Model {
         let (b, t, _) = inputs_embeds.dims3()?;
         let mut hs = inputs_embeds.clone();
 
-        
         let attention_mask_4d_cast = match attention_mask_4d {
             Some(m) => Some(m.to_dtype(hs.dtype())?),
             None => None,
@@ -1206,7 +1252,6 @@ impl Qwen3Model {
 
         let (cos, sin) = self.rotary_emb.forward(&hs, &position_ids)?;
 
-        
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             hs = layer.forward(&hs, attention_mask_4d_cast.as_ref(), (&cos, &sin))?;
             if let Some(additions) = deepstack_additions {
@@ -2262,6 +2307,26 @@ impl Qwen3VLEmbedding {
         normalized.to_vec2::<f32>()
     }
 
+    /// Set max_pixels for image preprocessing (affects image resolution)
+    pub fn set_max_pixels(&mut self, max_pixels: usize) {
+        self.preprocessor.max_pixels = max_pixels;
+    }
+
+    /// Set min_pixels for image preprocessing
+    pub fn set_min_pixels(&mut self, min_pixels: usize) {
+        self.preprocessor.min_pixels = min_pixels;
+    }
+
+    /// Get current max_pixels setting
+    pub fn max_pixels(&self) -> usize {
+        self.preprocessor.max_pixels
+    }
+
+    /// Get current min_pixels setting
+    pub fn min_pixels(&self) -> usize {
+        self.preprocessor.min_pixels
+    }
+
     fn embed_internal(
         &self,
         texts: Vec<Option<String>>,
@@ -2295,8 +2360,8 @@ impl Qwen3VLEmbedding {
 
         self.run_inference_on_prepared(prompts, prepared_inputs)
     }
-}
 
+}
 #[cfg(test)]
 mod tests {
     use super::{

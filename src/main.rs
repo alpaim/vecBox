@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     let device = utils::get_device()?;
     let dtype = utils::get_device_dtype(&device)?;
 
-    let embedder = models::qwen3::Qwen3VLEmbedding::from_gguf_and_mmproj(
+    let mut embedder = models::qwen3::Qwen3VLEmbedding::from_gguf_and_mmproj(
         downloaded.gguf_path,
         downloaded.mmproj_path,
         downloaded.config_dir,
@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     println!("Model loaded successfully!");
+    println!("Default max_pixels: {}, min_pixels: {}", embedder.max_pixels(), embedder.min_pixels());
 
     match cli.command {
         Commands::TextEmbedding(args) => {
@@ -53,6 +54,16 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::ImageEmbedding(args) => {
+            // Apply custom pixel settings if provided
+            if let Some(max_pixels) = args.max_pixels {
+                embedder.set_max_pixels(max_pixels);
+                println!("Using max_pixels: {}", max_pixels);
+            }
+            if let Some(min_pixels) = args.min_pixels {
+                embedder.set_min_pixels(min_pixels);
+                println!("Using min_pixels: {}", min_pixels);
+            }
+
             let instruction = args.instruction.map(|i| utils::resolve_input(&i));
 
             let files = utils::get_files_from_directory(&args.input);

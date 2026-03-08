@@ -7,15 +7,15 @@ extern crate intel_mkl_src;
 #[cfg(feature = "accelerate")]
 extern crate accelerate_src;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_core::quantized::{gguf_file, QMatMul};
-use candle_nn::{linear, linear_no_bias, Activation, Linear, Module, VarBuilder};
-use image::{imageops::FilterType, DynamicImage};
+use candle_core::quantized::{QMatMul, gguf_file};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
+use candle_nn::{Activation, Linear, Module, VarBuilder, linear, linear_no_bias};
+use image::{DynamicImage, imageops::FilterType};
 use serde::Deserialize;
-use unicode_categories::UnicodeCategories;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use unicode_categories::UnicodeCategories;
 
 #[cfg(feature = "hf-hub")]
 use hf_hub::api::sync::ApiBuilder;
@@ -44,7 +44,7 @@ impl candle_nn::Module for QLinear {
                     let out_f32 = qm.forward(&xs_f32)?;
                     out_f32.to_dtype(xs.dtype())
                 }
-            },
+            }
             Self::QuantizedWithBias(qm, bias) => {
                 let out = if xs.dtype() == DType::F32 {
                     qm.forward(xs)?
@@ -201,8 +201,6 @@ fn build_attention_mask_4d(attention_mask_2d: &Tensor) -> Result<Tensor> {
     let device = attention_mask_2d.device();
     let mask_value = -1e4f32;
 
-    // Not sure if it is optimal
-
     let causal = {
         let mut data = vec![0.0f32; seq_len * seq_len];
         for i in 0..seq_len {
@@ -213,16 +211,17 @@ fn build_attention_mask_4d(attention_mask_2d: &Tensor) -> Result<Tensor> {
         Tensor::from_vec(data, (1, 1, seq_len, seq_len), device)?
     };
 
-    let pad_mask_expanded = attention_mask_2d.unsqueeze(1)?.unsqueeze(2)?;
-    let pad_mask_expanded = pad_mask_expanded.expand((batch_size, 1, seq_len, seq_len))?;
-    let pad_mask_f32 = pad_mask_expanded.to_dtype(DType::F32)?;
+    let pad_mask_f32 = attention_mask_2d.to_dtype(DType::F32)?;
     let ones = Tensor::ones_like(&pad_mask_f32)?;
-    let inverted_mask = ones.sub(&pad_mask_f32)?;
+    let inverted_mask = ones.sub(&pad_mask_f32)?; 
+    
     let mask_val_t = Tensor::new(&[mask_value], device)?;
-    let pad_additive = inverted_mask.broadcast_mul(&mask_val_t)?;
+    let pad_additive = inverted_mask.broadcast_mul(&mask_val_t)?; 
+
+    let pad_additive = pad_additive.unsqueeze(1)?.unsqueeze(2)?;
 
     let causal_broadcast = causal.broadcast_as((batch_size, 1, seq_len, seq_len))?;
-    causal_broadcast.add(&pad_additive)
+    causal_broadcast.broadcast_add(&pad_additive)
 }
 
 fn l2_normalize(xs: &Tensor) -> Result<Tensor> {
@@ -349,8 +348,23 @@ fn preprocess_image(img: &DynamicImage, cfg: &Qwen3VLPreprocessorConfig) -> Resu
         &rgb,
         resized_w as u32,
         resized_h as u32,
-        FilterType::CatmullRom,
+        FilterType::Triangle,
     );
+
+    let scale = [
+        cfg.rescale_factor / cfg.image_std[0],
+        cfg.rescale_factor / cfg.image_std[1],
+        cfg.rescale_factor / cfg.image_std[2],
+    ];
+    let offset = [
+        cfg.image_mean[0] / cfg.image_std[0],
+        cfg.image_mean[1] / cfg.image_std[1],
+        cfg.image_mean[2] / cfg.image_std[2],
+    ];
+
+    let width = resized.width() as usize;
+    let height = resized.height() as usize;
+    let pixels = resized.as_raw();
 
     let grid_t = 1usize;
     let grid_h = resized_h / cfg.patch_size;
@@ -366,10 +380,12 @@ fn preprocess_image(img: &DynamicImage, cfg: &Qwen3VLPreprocessorConfig) -> Resu
     let channels = 3usize;
     let patch_dim = channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
     let total_patch_tokens = grid_t * grid_h * grid_w;
-    let mut out = Vec::with_capacity(total_patch_tokens * patch_dim);
+    let total_values = total_patch_tokens * patch_dim;
+    let mut out = Vec::with_capacity(total_values);
+    out.resize(total_values, 0.0);
 
-    for t in 0..grid_t {
-        let _ = t;
+    let mut idx = 0;
+    for _t in 0..grid_t {
         for gh_block in 0..(grid_h / merge) {
             for gw_block in 0..(grid_w / merge) {
                 for mh in 0..merge {
@@ -383,11 +399,10 @@ fn preprocess_image(img: &DynamicImage, cfg: &Qwen3VLPreprocessorConfig) -> Resu
                                     for pw in 0..cfg.patch_size {
                                         let y = gh * cfg.patch_size + ph;
                                         let x = gw * cfg.patch_size + pw;
-                                        let pixel = resized.get_pixel(x as u32, y as u32).0[c];
-                                        let mut value = pixel as f32;
-                                        value *= cfg.rescale_factor;
-                                        value = (value - cfg.image_mean[c]) / cfg.image_std[c];
-                                        out.push(value);
+                                        let pixel_idx = (y * width + x) * 3 + c;
+                                        let pixel = pixels[pixel_idx] as f32;
+                                        out[idx] = pixel * scale[c] - offset[c];
+                                        idx += 1;
                                     }
                                 }
                             }
@@ -408,7 +423,10 @@ fn preprocess_image(img: &DynamicImage, cfg: &Qwen3VLPreprocessorConfig) -> Resu
     })
 }
 
-fn preprocess_video(frames: &[DynamicImage], cfg: &Qwen3VLPreprocessorConfig) -> Result<PreparedImage> {
+fn preprocess_video(
+    frames: &[DynamicImage],
+    cfg: &Qwen3VLPreprocessorConfig,
+) -> Result<PreparedImage> {
     if frames.is_empty() {
         return Err(candle_core::Error::Msg("Video frames list is empty".into()));
     }
@@ -417,9 +435,12 @@ fn preprocess_video(frames: &[DynamicImage], cfg: &Qwen3VLPreprocessorConfig) ->
     if cfg.image_mean.len() != 3 || cfg.image_std.len() != 3 {
         return Err(candle_core::Error::Msg("Invalid mean/std config".into()));
     }
-    
-    let mut processed_frames: Vec<std::borrow::Cow<DynamicImage>> = frames.iter().map(|f| std::borrow::Cow::Borrowed(f)).collect();
-    
+
+    let mut processed_frames: Vec<std::borrow::Cow<DynamicImage>> = frames
+        .iter()
+        .map(|f| std::borrow::Cow::Borrowed(f))
+        .collect();
+
     if processed_frames.len() % cfg.temporal_patch_size != 0 {
         if let Some(last) = processed_frames.last() {
             processed_frames.push(last.clone());
@@ -433,7 +454,7 @@ fn preprocess_video(frames: &[DynamicImage], cfg: &Qwen3VLPreprocessorConfig) ->
     let first_frame = &processed_frames[0];
     let (orig_w, orig_h) = (first_frame.width(), first_frame.height());
     let factor = cfg.patch_size * cfg.merge_size;
-    
+
     let (resized_h, resized_w) = smart_resize(
         orig_h as usize,
         orig_w as usize,
@@ -451,7 +472,7 @@ fn preprocess_video(frames: &[DynamicImage], cfg: &Qwen3VLPreprocessorConfig) ->
                 &rgb,
                 resized_w as u32,
                 resized_h as u32,
-                FilterType::CatmullRom,
+                FilterType::Triangle,
             );
             resized
         })
@@ -470,10 +491,10 @@ fn preprocess_video(frames: &[DynamicImage], cfg: &Qwen3VLPreprocessorConfig) ->
     let channels = 3usize;
 
     let patch_dim = channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
-    
+
     let total_patch_tokens = grid_t * grid_h * grid_w;
     let mut out = Vec::with_capacity(total_patch_tokens * patch_dim);
-    
+
     for t_block in 0..grid_t {
         for gh_block in 0..(grid_h / merge) {
             for gw_block in 0..(grid_w / merge) {
@@ -491,13 +512,15 @@ fn preprocess_video(frames: &[DynamicImage], cfg: &Qwen3VLPreprocessorConfig) ->
                                     for pw in 0..cfg.patch_size {
                                         let y = gh * cfg.patch_size + ph;
                                         let x = gw * cfg.patch_size + pw;
-                                        
-                                        let pixel = if x < frame.width() as usize && y < frame.height() as usize {
+
+                                        let pixel = if x < frame.width() as usize
+                                            && y < frame.height() as usize
+                                        {
                                             frame.get_pixel(x as u32, y as u32).0[c]
                                         } else {
                                             0 // Padding
                                         };
-                                        
+
                                         let mut value = pixel as f32;
                                         value *= cfg.rescale_factor;
                                         value = (value - cfg.image_mean[c]) / cfg.image_std[c];
@@ -513,7 +536,7 @@ fn preprocess_video(frames: &[DynamicImage], cfg: &Qwen3VLPreprocessorConfig) ->
     }
 
     let num_llm_tokens = total_patch_tokens / (merge * merge);
-    
+
     Ok(PreparedImage {
         pixel_values: out,
         grid_t: grid_t as u32,
@@ -726,9 +749,21 @@ pub struct Qwen3MLP {
 
 impl Qwen3MLP {
     pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
-        let gate_proj = QLinear::Unquantized(linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))?);
-        let up_proj = QLinear::Unquantized(linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))?);
-        let down_proj = QLinear::Unquantized(linear_no_bias(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"))?);
+        let gate_proj = QLinear::Unquantized(linear_no_bias(
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            vb.pp("gate_proj"),
+        )?);
+        let up_proj = QLinear::Unquantized(linear_no_bias(
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            vb.pp("up_proj"),
+        )?);
+        let down_proj = QLinear::Unquantized(linear_no_bias(
+            cfg.intermediate_size,
+            cfg.hidden_size,
+            vb.pp("down_proj"),
+        )?);
         Ok(Self {
             gate_proj,
             up_proj,
@@ -1031,23 +1066,26 @@ impl Qwen3Attention {
         let k = repeat_kv(&k, self.num_kv_groups)?; // [B,Nh,T,D]
         let v = repeat_kv(&v, self.num_kv_groups)?; // [B,Nh,T,D]
 
-        // attn_weights = q @ k^T * scaling
-        let kt = k.transpose(2, 3)?; // [B,Nh,D,T]
-        let mut attn = q.matmul(&kt)?; // [B,Nh,T,T]
+        // Use SDPA for O(n) memory instead of O(n²)
+        // SDPA expects: q,k,v in [B, H, T, D], mask in [B, Qheads, T, T]
+        // Expand mask from [B, 1, T, T] to [B, Nheads, T, T] and convert dtype
+        let mask = if let Some(mask) = attention_mask {
+            let mask = mask.broadcast_as((b, self.num_heads, t, t))?;
+            Some(mask)
+        } else {
+            None
+        };
 
-        let scale = scalar_f32(attn.device(), self.scaling)?.to_dtype(attn.dtype())?;
-        attn = attn.broadcast_mul(&scale)?;
+        let out = candle_nn::ops::sdpa(
+            &q,
+            &k,
+            &v,
+            mask.as_ref(),
+            false,
+            self.scaling,
+            1.0,
+        )?;
 
-        if let Some(mask) = attention_mask {
-            let mask_cast = mask.to_dtype(attn.dtype())?;
-            attn = attn.broadcast_add(&mask_cast)?;
-        }
-
-        // softmax over last dim
-        let attn = candle_nn::ops::softmax(&attn, D::Minus1)?;
-
-        // attn_output = attn @ v -> [B,Nh,T,D]
-        let out = attn.matmul(&v)?;
         // transpose back -> [B,T,Nh,D] -> reshape [B,T,Nh*D] -> o_proj -> [B,T,H]
         let out = out.transpose(1, 2)?.reshape((b, t, self.num_heads * d))?;
         out.apply(&self.o_proj)
@@ -1085,19 +1123,17 @@ impl Qwen3DecoderLayer {
         attention_mask: Option<&Tensor>,
         position_embeddings: (&Tensor, &Tensor),
     ) -> Result<Tensor> {
-        // Pre-norm
-        let residual = hidden_states.clone();
+        // Pre-norm + Attention with residual
         let hs = hidden_states.apply(&self.input_layernorm)?;
         let hs = self
             .self_attn
             .forward(&hs, position_embeddings, attention_mask)?;
-        let hs = (residual + hs)?;
+        let hs = hidden_states.add(&hs)?;
 
-        // MLP
-        let residual = hs.clone();
+        // MLP with residual
         let hs2 = hs.apply(&self.post_attention_layernorm)?;
         let hs2 = hs2.apply(&self.mlp)?;
-        residual + hs2
+        hs.add(&hs2)
     }
 }
 
@@ -1148,6 +1184,12 @@ impl Qwen3Model {
         let (b, t, _) = inputs_embeds.dims3()?;
         let mut hs = inputs_embeds.clone();
 
+        
+        let attention_mask_4d_cast = match attention_mask_4d {
+            Some(m) => Some(m.to_dtype(hs.dtype())?),
+            None => None,
+        };
+
         let default_position_ids = if position_ids.is_none() {
             let pos_1d = Tensor::arange(0u32, t as u32, hs.device())?;
             Some(pos_1d.unsqueeze(0)?.expand((b, t))?.contiguous()?)
@@ -1162,12 +1204,11 @@ impl Qwen3Model {
             })?
         };
 
-        // position_embeddings = (cos,sin) once
         let (cos, sin) = self.rotary_emb.forward(&hs, &position_ids)?;
 
-        // layers
+        
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            hs = layer.forward(&hs, attention_mask_4d, (&cos, &sin))?;
+            hs = layer.forward(&hs, attention_mask_4d_cast.as_ref(), (&cos, &sin))?;
             if let Some(additions) = deepstack_additions {
                 if let Some(visual_add) = additions.get(layer_idx) {
                     hs = hs.add(visual_add)?;
@@ -1175,10 +1216,8 @@ impl Qwen3Model {
             }
         }
 
-        // final norm
         hs.apply(&self.norm)
     }
-
     /// input_ids: [B,T]
     /// attention_mask: optionally [B,T] (1=token,0=pad) OR already expanded additive mask [B,1,T,T]
     /// Here we assume additive mask [B,1,T,T] for simplicity (HF does that).
@@ -1207,7 +1246,8 @@ impl Qwen3Model {
         dtype: DType,
     ) -> candle_core::Result<Tensor> {
         // Pass `device` as the 3rd argument
-        let qt = content.tensor(file, name, device)
+        let qt = content
+            .tensor(file, name, device)
             .map_err(|e| candle_core::Error::Msg(format!("Missing {name}: {e}")))?;
         qt.dequantize(device)?.to_dtype(dtype)
     }
@@ -1220,7 +1260,8 @@ impl Qwen3Model {
         dtype: DType,
     ) -> candle_core::Result<QLinear> {
         // Pass `device` as the 3rd argument
-        let qt = content.tensor(file, &format!("{name}.weight"), device)
+        let qt = content
+            .tensor(file, &format!("{name}.weight"), device)
             .map_err(|e| candle_core::Error::Msg(format!("Missing {name}.weight: {e}")))?;
         let inner = QMatMul::from_qtensor(qt)?;
 
@@ -1243,29 +1284,69 @@ impl Qwen3Model {
         let tok_emb = Self::get_gguf_tensor("token_embd.weight", content, file, device, dtype)?;
         let embed_tokens = candle_nn::Embedding::new(tok_emb, cfg.hidden_size);
 
-        let norm_weight = Self::get_gguf_tensor("output_norm.weight", content, file, device, dtype)?;
+        let norm_weight =
+            Self::get_gguf_tensor("output_norm.weight", content, file, device, dtype)?;
         let norm = Qwen3RMSNorm::from_tensor(norm_weight, cfg.rms_norm_eps);
 
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {
-            let q_proj = Self::get_gguf_qlinear(&format!("blk.{i}.attn_q"), content, file, device, dtype)?;
-            let k_proj = Self::get_gguf_qlinear(&format!("blk.{i}.attn_k"), content, file, device, dtype)?;
-            let v_proj = Self::get_gguf_qlinear(&format!("blk.{i}.attn_v"), content, file, device, dtype)?;
-            let o_proj = Self::get_gguf_qlinear(&format!("blk.{i}.attn_output"), content, file, device, dtype)?;
-            
-            let q_norm_w = Self::get_gguf_tensor(&format!("blk.{i}.attn_q_norm.weight"), content, file, device, dtype)?;
-            let k_norm_w = Self::get_gguf_tensor(&format!("blk.{i}.attn_k_norm.weight"), content, file, device, dtype)?;
-            
-            let gate_proj = Self::get_gguf_qlinear(&format!("blk.{i}.ffn_gate"), content, file, device, dtype)?;
-            let up_proj = Self::get_gguf_qlinear(&format!("blk.{i}.ffn_up"), content, file, device, dtype)?;
-            let down_proj = Self::get_gguf_qlinear(&format!("blk.{i}.ffn_down"), content, file, device, dtype)?;
-            
-            let input_norm_w = Self::get_gguf_tensor(&format!("blk.{i}.attn_norm.weight"), content, file, device, dtype)?;
-            let post_attn_norm_w = Self::get_gguf_tensor(&format!("blk.{i}.ffn_norm.weight"), content, file, device, dtype)?;
+            let q_proj =
+                Self::get_gguf_qlinear(&format!("blk.{i}.attn_q"), content, file, device, dtype)?;
+            let k_proj =
+                Self::get_gguf_qlinear(&format!("blk.{i}.attn_k"), content, file, device, dtype)?;
+            let v_proj =
+                Self::get_gguf_qlinear(&format!("blk.{i}.attn_v"), content, file, device, dtype)?;
+            let o_proj = Self::get_gguf_qlinear(
+                &format!("blk.{i}.attn_output"),
+                content,
+                file,
+                device,
+                dtype,
+            )?;
+
+            let q_norm_w = Self::get_gguf_tensor(
+                &format!("blk.{i}.attn_q_norm.weight"),
+                content,
+                file,
+                device,
+                dtype,
+            )?;
+            let k_norm_w = Self::get_gguf_tensor(
+                &format!("blk.{i}.attn_k_norm.weight"),
+                content,
+                file,
+                device,
+                dtype,
+            )?;
+
+            let gate_proj =
+                Self::get_gguf_qlinear(&format!("blk.{i}.ffn_gate"), content, file, device, dtype)?;
+            let up_proj =
+                Self::get_gguf_qlinear(&format!("blk.{i}.ffn_up"), content, file, device, dtype)?;
+            let down_proj =
+                Self::get_gguf_qlinear(&format!("blk.{i}.ffn_down"), content, file, device, dtype)?;
+
+            let input_norm_w = Self::get_gguf_tensor(
+                &format!("blk.{i}.attn_norm.weight"),
+                content,
+                file,
+                device,
+                dtype,
+            )?;
+            let post_attn_norm_w = Self::get_gguf_tensor(
+                &format!("blk.{i}.ffn_norm.weight"),
+                content,
+                file,
+                device,
+                dtype,
+            )?;
 
             layers.push(Qwen3DecoderLayer {
                 self_attn: Qwen3Attention {
-                    q_proj, k_proj, v_proj, o_proj,
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
                     q_norm: Qwen3RMSNorm::from_tensor(q_norm_w, cfg.rms_norm_eps),
                     k_norm: Qwen3RMSNorm::from_tensor(k_norm_w, cfg.rms_norm_eps),
                     num_heads: cfg.num_attention_heads,
@@ -1274,33 +1355,50 @@ impl Qwen3Model {
                     head_dim: cfg.head_dim(),
                     scaling: (cfg.head_dim() as f32).powf(-0.5),
                 },
-                mlp: Qwen3MLP { gate_proj, up_proj, down_proj, act_fn: cfg.hidden_act },
+                mlp: Qwen3MLP {
+                    gate_proj,
+                    up_proj,
+                    down_proj,
+                    act_fn: cfg.hidden_act,
+                },
                 input_layernorm: Qwen3RMSNorm::from_tensor(input_norm_w, cfg.rms_norm_eps),
-                post_attention_layernorm: Qwen3RMSNorm::from_tensor(post_attn_norm_w, cfg.rms_norm_eps),
+                post_attention_layernorm: Qwen3RMSNorm::from_tensor(
+                    post_attn_norm_w,
+                    cfg.rms_norm_eps,
+                ),
             });
         }
 
         let rotary_emb = Qwen3RotaryEmbedding::new(&cfg, device)?;
 
-        Ok(Self { embed_tokens, layers, norm, rotary_emb, cfg, device: device.clone() })
+        Ok(Self {
+            embed_tokens,
+            layers,
+            norm,
+            rotary_emb,
+            cfg,
+            device: device.clone(),
+        })
     }
 
     pub fn load_vision_mmproj_varbuilder<'a>(
         path: &std::path::Path,
         device: &Device,
-        dtype: DType, 
+        dtype: DType,
     ) -> candle_core::Result<candle_nn::VarBuilder<'a>> {
         let mut file = std::fs::File::open(path)?;
-        let content = gguf_file::Content::read(&mut file).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let content = gguf_file::Content::read(&mut file)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
         let mut tensors = std::collections::HashMap::new();
-        
+
         // We need to catch the two halves of the 3D patch embedding kernel
         let mut patch_embd_0 = None;
         let mut patch_embd_1 = None;
 
         for (name, _) in content.tensor_infos.iter() {
-            let qtensor = content.tensor(&mut file, name, device)
+            let qtensor = content
+                .tensor(&mut file, name, device)
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
             let tensor = qtensor.dequantize(device)?.to_dtype(dtype)?;
 
@@ -1348,8 +1446,8 @@ impl Qwen3Model {
                     .replace("v.blk.", "blocks.")
                     .replace(".attn_out.", ".attn.proj.")
                     .replace(".attn_qkv.", ".attn.qkv.")
-                    .replace(".ffn_up.", ".mlp.linear_fc1.")    // llama.cpp up = safetensors fc1
-                    .replace(".ffn_down.", ".mlp.linear_fc2.")  // llama.cpp down = safetensors fc2
+                    .replace(".ffn_up.", ".mlp.linear_fc1.") // llama.cpp up = safetensors fc1
+                    .replace(".ffn_down.", ".mlp.linear_fc2.") // llama.cpp down = safetensors fc2
                     .replace(".ln1.", ".norm1.")
                     .replace(".ln2.", ".norm2.");
             }
@@ -1359,7 +1457,7 @@ impl Qwen3Model {
 
         // 6. Reconstruct the 3D Patch Embedding Kernel by stacking the temporal dimension
         if let Some(t0) = patch_embd_0 {
-        if let Some(t1) = patch_embd_1 {
+            if let Some(t1) = patch_embd_1 {
                 let t0 = t0.unsqueeze(2)?;
                 let t1 = t1.unsqueeze(2)?;
                 let stacked = candle_core::Tensor::cat(&[&t0, &t1], 2)?;
@@ -1369,7 +1467,7 @@ impl Qwen3Model {
             }
         } else {
             return Err(candle_core::Error::Msg(
-                "Missing v.patch_embd.weight in the mmproj file!".to_string()
+                "Missing v.patch_embd.weight in the mmproj file!".to_string(),
             ));
         }
 
@@ -1540,8 +1638,9 @@ impl Qwen3TextEmbedding {
 
         let model = Qwen3Model::from_gguf(cfg, &content, &mut file, device, dtype)?;
 
-        let mut tokenizer = tokenizers::Tokenizer::from_file(model_dir_for_configs.as_ref().join("tokenizer.json"))
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let mut tokenizer =
+            tokenizers::Tokenizer::from_file(model_dir_for_configs.as_ref().join("tokenizer.json"))
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
         let _ = tokenizer.with_padding(Some(PaddingParams {
             strategy: PaddingStrategy::BatchLongest,
@@ -1763,20 +1862,30 @@ impl Qwen3VLEmbedding {
         let cfg_bytes = std::fs::read(model_dir.join("config.json")).map_err(map_err)?;
         let cfg: Qwen3VLFullConfig = serde_json::from_slice(&cfg_bytes).map_err(map_err)?;
 
-        let preprocessor_bytes = std::fs::read(model_dir.join("preprocessor_config.json")).map_err(map_err)?;
-        let preprocessor: Qwen3VLPreprocessorConfig = serde_json::from_slice(&preprocessor_bytes).map_err(map_err)?;
+        let preprocessor_bytes =
+            std::fs::read(model_dir.join("preprocessor_config.json")).map_err(map_err)?;
+        let preprocessor: Qwen3VLPreprocessorConfig =
+            serde_json::from_slice(&preprocessor_bytes).map_err(map_err)?;
 
         // 2. Load Quantized Text GGUF
         let mut text_file = std::fs::File::open(text_gguf_path.as_ref())?;
         let text_content = gguf_file::Content::read(&mut text_file).map_err(map_err)?;
-        let text_model = Qwen3Model::from_gguf(cfg.text_config.clone(), &text_content, &mut text_file, device, dtype)?;
+        let text_model = Qwen3Model::from_gguf(
+            cfg.text_config.clone(),
+            &text_content,
+            &mut text_file,
+            device,
+            dtype,
+        )?;
 
         // 3. Load F16 Vision mmproj
-        let vision_vb = Qwen3Model::load_vision_mmproj_varbuilder(mmproj_path.as_ref(), device, dtype)?;
+        let vision_vb =
+            Qwen3Model::load_vision_mmproj_varbuilder(mmproj_path.as_ref(), device, dtype)?;
         let vision_model = Qwen3VLVisionModel::new(&cfg.vision_config, vision_vb)?;
 
         // 4. Tokenizer
-        let mut tokenizer = tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(map_err)?;
+        let mut tokenizer =
+            tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(map_err)?;
         let _ = tokenizer.with_padding(Some(tokenizers::PaddingParams {
             strategy: tokenizers::PaddingStrategy::BatchLongest,
             direction: tokenizers::PaddingDirection::Right,
@@ -1818,12 +1927,10 @@ impl Qwen3VLEmbedding {
 
         for visual in visuals {
             let prepared = match visual {
-                Some(VisualInput::Image(img)) => {
-                    Some(preprocess_image(img, &self.preprocessor)?)
-                }
+                Some(VisualInput::Image(img)) => Some(preprocess_image(img, &self.preprocessor)?),
                 Some(VisualInput::Video(frames)) => {
                     if frames.is_empty() {
-                         return Err(candle_core::Error::Msg("Empty video frames".into()));
+                        return Err(candle_core::Error::Msg("Empty video frames".into()));
                     }
                     Some(preprocess_video(frames, &self.preprocessor)?)
                 }
@@ -1833,17 +1940,17 @@ impl Qwen3VLEmbedding {
         }
 
         let mut prompts = Vec::with_capacity(batch_size);
-        
+
         for (i, prepared) in prepared_inputs.iter().enumerate() {
             let user_text = texts[i].as_ref().map(|s| s.as_ref());
-            
+
             let inst = prepare_instruction(
-                instructions[i].as_ref().map(|s| s.as_ref()), 
-                &self.default_instruction
+                instructions[i].as_ref().map(|s| s.as_ref()),
+                &self.default_instruction,
             );
-            
+
             let mut prompt = build_vl_prompt(user_text, prepared.is_some(), &inst);
-            
+
             if let Some(p) = prepared {
                 prompt = expand_image_token_placeholders(&prompt, p.num_llm_tokens)?;
             }
@@ -1857,9 +1964,9 @@ impl Qwen3VLEmbedding {
     /// Embed a batch of texts with custom instructions for each.
     /// You can pass `None` for a specific item to use the default instruction.
     pub fn embed_texts_with_instructions<S1: AsRef<str>, S2: AsRef<str>>(
-        &self, 
-        texts: &[S1], 
-        instructions: &[Option<S2>]
+        &self,
+        texts: &[S1],
+        instructions: &[Option<S2>],
     ) -> Result<Vec<Vec<f32>>> {
         if texts.len() != instructions.len() {
             return Err(candle_core::Error::Msg(
@@ -1870,7 +1977,7 @@ impl Qwen3VLEmbedding {
         let text_inputs: Vec<Option<String>> =
             texts.iter().map(|t| Some(t.as_ref().to_string())).collect();
         let image_inputs: Vec<Option<DynamicImage>> = (0..texts.len()).map(|_| None).collect();
-        
+
         let inst_inputs: Vec<Option<String>> = instructions
             .iter()
             .map(|inst| inst.as_ref().map(|s| s.as_ref().to_string()))
@@ -1881,9 +1988,9 @@ impl Qwen3VLEmbedding {
 
     /// Embed a batch of image paths with custom instructions for each.
     pub fn embed_images_with_instructions<S1: AsRef<Path>, S2: AsRef<str>>(
-        &self, 
-        images: &[S1], 
-        instructions: &[Option<S2>]
+        &self,
+        images: &[S1],
+        instructions: &[Option<S2>],
     ) -> Result<Vec<Vec<f32>>> {
         if images.len() != instructions.len() {
             return Err(candle_core::Error::Msg(
@@ -1896,7 +2003,7 @@ impl Qwen3VLEmbedding {
             image_inputs.push(Some(load_image_from_path(path.as_ref())?));
         }
         let text_inputs: Vec<Option<String>> = (0..images.len()).map(|_| None).collect();
-        
+
         let inst_inputs: Vec<Option<String>> = instructions
             .iter()
             .map(|inst| inst.as_ref().map(|s| s.as_ref().to_string()))
@@ -1937,12 +2044,12 @@ impl Qwen3VLEmbedding {
         let mut prompts = Vec::with_capacity(videos.len());
         for (i, prepared) in prepared_videos.iter().enumerate() {
             let inst = prepare_instruction(
-                instructions[i].as_ref().map(|s| s.as_ref()), 
-                &self.default_instruction
+                instructions[i].as_ref().map(|s| s.as_ref()),
+                &self.default_instruction,
             );
-            
+
             let mut prompt = build_vl_prompt(None, prepared.is_some(), &inst);
-            
+
             if let Some(p) = prepared {
                 prompt = expand_image_token_placeholders(&prompt, p.num_llm_tokens)?;
             }
@@ -2041,11 +2148,11 @@ impl Qwen3VLEmbedding {
         let input_ids = Tensor::from_vec(input_ids_vec, (batch_size, seq_len), device)?;
         let attention_mask_2d =
             Tensor::from_vec(attention_mask_vec, (batch_size, seq_len), device)?;
-        
+
         // Getting text embeddings
         let mut inputs_embeds = self.model.embed_tokens(&input_ids)?;
         let hidden_size = self.model.config().hidden_size;
-        
+
         let mut deepstack_additions: Option<Vec<Tensor>> = None;
         let mut position_ids: Option<Tensor> = None;
 
@@ -2060,7 +2167,7 @@ impl Qwen3VLEmbedding {
             let mut pixel_values = Vec::new();
             let mut grid_thw = Vec::new();
 
-            // Collecting all pixels of all images to one 
+            // Collecting all pixels of all images to one
             for prepared in prepared_inputs.iter().flatten() {
                 pixel_values.extend_from_slice(&prepared.pixel_values);
                 grid_thw.extend_from_slice(&[prepared.grid_t, prepared.grid_h, prepared.grid_w]);
@@ -2070,9 +2177,9 @@ impl Qwen3VLEmbedding {
             let pixel_values =
                 Tensor::from_vec(pixel_values, (num_patch_tokens, patch_dim), device)?
                     .to_dtype(inputs_embeds.dtype())?;
-            
+
             let image_grid_thw = Tensor::from_vec(grid_thw, (num_inputs, 3), device)?;
-            
+
             // mRoPE
             position_ids = Some(build_image_position_ids(
                 &encodings,
@@ -2085,7 +2192,7 @@ impl Qwen3VLEmbedding {
             // Vision Tower
             let (vision_embeds, deepstack_image_embeds) =
                 self.vision.forward(&pixel_values, &image_grid_thw)?;
-            
+
             // 5. Injection
             let mut offset = 0usize;
 
@@ -2097,8 +2204,8 @@ impl Qwen3VLEmbedding {
 
                 let image_chunk = vision_embeds.narrow(0, offset, span_len)?;
                 offset += span_len;
-                
-                // Replacing placeholders with real vectors of image 
+
+                // Replacing placeholders with real vectors of image
                 inputs_embeds = inputs_embeds.slice_assign(
                     &[batch_idx..batch_idx + 1, *start..*end, 0..hidden_size],
                     &image_chunk.unsqueeze(0)?,
@@ -2111,7 +2218,7 @@ impl Qwen3VLEmbedding {
                 ));
             }
 
-            // Deepstack (if used)
+            // Deepstack (if used) - this allocates full tensors but is needed for LLM addition
             if !deepstack_image_embeds.is_empty() {
                 let mut per_layer_additions = Vec::with_capacity(deepstack_image_embeds.len());
                 for deepstack_layer in deepstack_image_embeds {
@@ -2141,7 +2248,7 @@ impl Qwen3VLEmbedding {
 
         // 6. Final LLM pass
         let attention_mask_4d = build_attention_mask_4d(&attention_mask_2d)?;
-        
+
         let hidden = self.model.forward_with_inputs_embeds(
             &inputs_embeds,
             Some(&attention_mask_4d),
@@ -2162,9 +2269,11 @@ impl Qwen3VLEmbedding {
         instructions: Vec<Option<String>>,
     ) -> Result<Vec<Vec<f32>>> {
         if texts.len() != images.len() || texts.len() != instructions.len() {
-             return Err(candle_core::Error::Msg("Batch sizes mismatch".into()));
+            return Err(candle_core::Error::Msg("Batch sizes mismatch".into()));
         }
-        if texts.is_empty() { return Ok(Vec::new()); }
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let mut prepared_inputs = Vec::with_capacity(images.len());
         for image in &images {
@@ -2176,10 +2285,7 @@ impl Qwen3VLEmbedding {
 
         let mut prompts = Vec::with_capacity(texts.len());
         for (i, (text, prepared)) in texts.iter().zip(prepared_inputs.iter()).enumerate() {
-            let inst = prepare_instruction(
-                instructions[i].as_deref(),
-                &self.default_instruction
-            );
+            let inst = prepare_instruction(instructions[i].as_deref(), &self.default_instruction);
             let mut prompt = build_vl_prompt(text.as_deref(), prepared.is_some(), &inst);
             if let Some(prepared) = prepared {
                 prompt = expand_image_token_placeholders(&prompt, prepared.num_llm_tokens)?;

@@ -30,7 +30,11 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     println!("Model loaded successfully!");
-    println!("Default max_pixels: {}, min_pixels: {}", embedder.max_pixels(), embedder.min_pixels());
+    println!(
+        "Default max_pixels: {}, min_pixels: {}",
+        embedder.max_pixels(),
+        embedder.min_pixels()
+    );
 
     match cli.command {
         Commands::TextEmbedding(args) => {

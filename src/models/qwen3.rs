@@ -1956,6 +1956,22 @@ impl Qwen3VLEmbedding {
         self.model.device()
     }
 
+    pub fn max_pixels(&self) -> usize {
+        self.preprocessor.max_pixels
+    }
+
+    pub fn min_pixels(&self) -> usize {
+        self.preprocessor.min_pixels
+    }
+
+    pub fn set_max_pixels(&mut self, max_pixels: usize) {
+        self.preprocessor.max_pixels = max_pixels;
+    }
+
+    pub fn set_min_pixels(&mut self, min_pixels: usize) {
+        self.preprocessor.min_pixels = min_pixels;
+    }
+
     pub fn embed_batch<S1: AsRef<str>, S2: AsRef<str>>(
         &self,
         visuals: &[Option<VisualInput>],

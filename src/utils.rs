@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use candle_core::{Device, DType};
+use candle_core::{DType, Device};
 
 pub fn get_device() -> anyhow::Result<Device> {
     #[cfg(feature = "cuda")]

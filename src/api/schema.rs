@@ -1,30 +1,39 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum EmbeddingInput {
-    Single(InputContent),
-    Multiple(Vec<InputContent>),
+    String(String),
+    StringArray(Vec<String>),
+    ContentParts(Vec<EmbeddingContentPart>),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum InputContent {
+pub enum EmbeddingContentPart {
     Text { text: String },
-    ImageUrl { image_url: ImageUrl },
-    Video { video: VideoInput },
+    ImageUrl { image_url: EmbeddingImageUrl },
+    Video { video: EmbeddingVideo },
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ImageUrl {
+#[derive(Debug, Deserialize, Clone)]
+pub struct EmbeddingImageUrl {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
-pub enum VideoInput {
-    Frames(Vec<InputContent>),
+pub enum EmbeddingVideo {
+    Frames(Vec<EmbeddingContentPart>),
     Url { url: String },
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EncodingFormat {
+    #[default]
+    Float,
+    Base64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,7 +41,8 @@ pub struct EmbeddingRequest {
     pub model: Option<String>,
     pub input: EmbeddingInput,
     #[serde(default)]
-    pub encoding_format: Option<String>,
+    pub encoding_format: Option<EncodingFormat>,
+    #[serde(default)]
     pub instruction: Option<String>,
 }
 
@@ -44,10 +54,17 @@ pub struct EmbeddingResponse {
     pub usage: Usage,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(untagged)]
+pub enum EmbeddingVector {
+    Float(Vec<f32>),
+    Base64(String),
+}
+
 #[derive(Debug, Serialize)]
 pub struct EmbeddingData {
     pub object: &'static str,
-    pub embedding: Vec<f32>,
+    pub embedding: EmbeddingVector,
     pub index: usize,
 }
 

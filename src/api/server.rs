@@ -14,8 +14,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
 
 use crate::api::schema::{
-    EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse, ErrorResponse,
-    InputContent, Usage, VideoInput,
+    EmbeddingContentPart, EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse,
+    EmbeddingVector, EncodingFormat, ErrorResponse, Usage,
 };
 use crate::models::qwen3::Qwen3VLEmbedding;
 
@@ -54,161 +54,249 @@ pub async fn create_embedding(
     Json(req): Json<EmbeddingRequest>,
 ) -> Result<Json<EmbeddingResponse>, AppError> {
     let start = Instant::now();
+
+    let use_base64 = matches!(req.encoding_format, Some(EncodingFormat::Base64));
+
     let input_count = match &req.input {
-        EmbeddingInput::Single(_) => 1,
-        EmbeddingInput::Multiple(v) => v.len(),
+        EmbeddingInput::String(_) => 1,
+        EmbeddingInput::StringArray(v) => v.len(),
+        EmbeddingInput::ContentParts(v) => v.len(),
     };
 
     info!(
-        "Embedding request: {} input(s), model: {}",
-        input_count, state.model_name
+        "Embedding request: {} input(s), model: {}, base64: {}",
+        input_count, state.model_name, use_base64
     );
 
-    let inputs = match req.input {
-        EmbeddingInput::Single(content) => vec![content],
-        EmbeddingInput::Multiple(contents) => contents,
-    };
+    let instruction = req.instruction;
 
-    if inputs.is_empty() {
-        warn!("Empty embedding request received");
+    match &req.input {
+        EmbeddingInput::String(text) => {
+            let (embedding, tokens) = process_text(&state.embedder, text, instruction.as_deref())?;
+            let embedding = encode_embedding(embedding, use_base64);
+            let response = EmbeddingResponse {
+                object: "list",
+                data: vec![EmbeddingData {
+                    object: "embedding",
+                    embedding,
+                    index: 0,
+                }],
+                model: state.model_name.clone(),
+                usage: Usage {
+                    prompt_tokens: tokens,
+                    total_tokens: tokens,
+                },
+            };
+            info!(
+                "Embedding request completed: {} tokens, {}ms",
+                tokens,
+                start.elapsed().as_millis()
+            );
+            Ok(Json(response))
+        }
+        EmbeddingInput::StringArray(texts) => {
+            if texts.is_empty() {
+                warn!("Empty embedding request received");
+                return Err(AppError(ErrorResponse::new(
+                    "Input cannot be empty".to_string(),
+                )));
+            }
+            let mut embeddings = Vec::with_capacity(texts.len());
+            let mut total_tokens = 0usize;
+
+            for (idx, text) in texts.iter().enumerate() {
+                let (embedding, tokens) =
+                    process_text(&state.embedder, text, instruction.as_deref())?;
+                embeddings.push(EmbeddingData {
+                    object: "embedding",
+                    embedding: encode_embedding(embedding, use_base64),
+                    index: idx,
+                });
+                total_tokens += tokens;
+            }
+
+            let response = EmbeddingResponse {
+                object: "list",
+                data: embeddings,
+                model: state.model_name.clone(),
+                usage: Usage {
+                    prompt_tokens: total_tokens,
+                    total_tokens,
+                },
+            };
+
+            info!(
+                "Embedding request completed: {} inputs, {} tokens, {}ms",
+                texts.len(),
+                total_tokens,
+                start.elapsed().as_millis()
+            );
+            Ok(Json(response))
+        }
+        EmbeddingInput::ContentParts(parts) => {
+            if parts.is_empty() {
+                warn!("Empty embedding request received");
+                return Err(AppError(ErrorResponse::new(
+                    "Input cannot be empty".to_string(),
+                )));
+            }
+            let (embedding, tokens) =
+                process_content_parts(&state.embedder, parts, instruction.as_deref())?;
+            let embedding = encode_embedding(embedding, use_base64);
+            let response = EmbeddingResponse {
+                object: "list",
+                data: vec![EmbeddingData {
+                    object: "embedding",
+                    embedding,
+                    index: 0,
+                }],
+                model: state.model_name.clone(),
+                usage: Usage {
+                    prompt_tokens: tokens,
+                    total_tokens: tokens,
+                },
+            };
+            info!(
+                "Embedding request completed: {} parts, {} tokens, {}ms",
+                parts.len(),
+                tokens,
+                start.elapsed().as_millis()
+            );
+            Ok(Json(response))
+        }
+    }
+}
+
+fn encode_embedding(embedding: Vec<f32>, use_base64: bool) -> EmbeddingVector {
+    if use_base64 {
+        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+        EmbeddingVector::Base64(BASE64_STANDARD.encode(&bytes))
+    } else {
+        EmbeddingVector::Float(embedding)
+    }
+}
+
+fn process_text(
+    embedder: &Qwen3VLEmbedding,
+    text: &str,
+    instruction: Option<&str>,
+) -> Result<(Vec<f32>, usize), AppError> {
+    let encoding = embedder
+        .tokenizer()
+        .encode(text, true)
+        .map_err(|e| AppError(ErrorResponse::new(format!("Tokenization failed: {}", e))))?;
+    let token_count = encoding.len();
+
+    let instructions = vec![instruction.map(|s| s.to_string())];
+    let embeddings = embedder
+        .embed_texts_with_instructions(&[text.to_string()], &instructions)
+        .map_err(|e| AppError(ErrorResponse::new(format!("Embedding failed: {}", e))))?;
+
+    Ok((
+        embeddings.into_iter().next().unwrap_or_default(),
+        token_count,
+    ))
+}
+
+fn process_content_parts(
+    embedder: &Qwen3VLEmbedding,
+    parts: &[EmbeddingContentPart],
+    instruction: Option<&str>,
+) -> Result<(Vec<f32>, usize), AppError> {
+    let mut text_parts = Vec::new();
+    let mut image_bytes = Vec::new();
+    let mut video_count = 0;
+    let mut video_frames: Option<Vec<DynamicImage>> = None;
+    let mut total_tokens = 0usize;
+
+    for part in parts {
+        match part {
+            EmbeddingContentPart::Text { text } => {
+                let encoding = embedder
+                    .tokenizer()
+                    .encode(text.to_string(), true)
+                    .map_err(|e| {
+                        AppError(ErrorResponse::new(format!("Tokenization failed: {}", e)))
+                    })?;
+                total_tokens += encoding.len();
+                text_parts.push(text.clone());
+            }
+            EmbeddingContentPart::ImageUrl { image_url } => {
+                let (bytes, image) = decode_image_url(&image_url.url)?;
+                total_tokens += estimate_image_tokens(&image, embedder.max_pixels());
+                image_bytes.push(bytes);
+            }
+            EmbeddingContentPart::Video { video } => {
+                let frames = match video {
+                    crate::api::schema::EmbeddingVideo::Frames(frame_parts) => {
+                        let mut frames = Vec::new();
+                        for frame_part in frame_parts {
+                            match frame_part {
+                                EmbeddingContentPart::ImageUrl { image_url } => {
+                                    let (_, img) = decode_image_url(&image_url.url)?;
+                                    frames.push(img);
+                                }
+                                _ => {
+                                    return Err(AppError(ErrorResponse::new(
+                                        "Video frames must be image URLs".to_string(),
+                                    )));
+                                }
+                            }
+                        }
+                        frames
+                    }
+                    crate::api::schema::EmbeddingVideo::Url { url: _ } => {
+                        return Err(AppError(ErrorResponse::new(
+                            "Video URL downloading is not yet implemented. Please provide video as an array of image frames.".to_string(),
+                        )));
+                    }
+                };
+
+                if frames.is_empty() {
+                    return Err(AppError(ErrorResponse::new(
+                        "Video must contain at least one frame".to_string(),
+                    )));
+                }
+
+                total_tokens +=
+                    frames.len() * estimate_image_tokens(&frames[0], embedder.max_pixels());
+                if video_count > 0 {
+                    return Err(AppError(ErrorResponse::new(
+                        "Multiple videos in a single request are not supported. Please send one video at a time.".to_string(),
+                    )));
+                }
+                video_count += 1;
+                video_frames = Some(frames);
+            }
+        }
+    }
+
+    let instructions = vec![instruction.map(|s| s.to_string())];
+    let embedding: Vec<f32>;
+
+    if !text_parts.is_empty() && image_bytes.is_empty() && video_frames.is_none() {
+        let embeddings = embedder
+            .embed_texts_with_instructions(&text_parts, &instructions)
+            .map_err(|e| AppError(ErrorResponse::new(format!("Embedding failed: {}", e))))?;
+        embedding = embeddings.into_iter().next().unwrap_or_default();
+    } else if !image_bytes.is_empty() && text_parts.is_empty() && video_frames.is_none() {
+        let image_refs: Vec<&[u8]> = image_bytes.iter().map(|v| v.as_slice()).collect();
+        let embeddings = embedder
+            .embed_image_bytes_with_instructions(&image_refs, &instructions)
+            .map_err(|e| AppError(ErrorResponse::new(format!("Embedding failed: {}", e))))?;
+        embedding = embeddings.into_iter().next().unwrap_or_default();
+    } else if let Some(frames) = video_frames {
+        let embeddings = embedder
+            .embed_video_frames(&[frames], &instructions)
+            .map_err(|e| AppError(ErrorResponse::new(format!("Embedding failed: {}", e))))?;
+        embedding = embeddings.into_iter().next().unwrap_or_default();
+    } else {
         return Err(AppError(ErrorResponse::new(
-            "Input cannot be empty".to_string(),
+            "Mixed multimodal inputs are not yet supported. Use either text, images, or video frames.".to_string(),
         )));
     }
 
-    let instruction = req.instruction;
-    let mut embeddings = Vec::with_capacity(inputs.len());
-    let mut total_tokens = 0usize;
-
-    for (idx, input) in inputs.into_iter().enumerate() {
-        let input_type = match &input {
-            InputContent::Text { .. } => "text",
-            InputContent::ImageUrl { .. } => "image",
-            InputContent::Video { .. } => "video",
-        };
-        
-        let (embedding, tokens) =
-            process_single_input(&state.embedder, input, instruction.as_deref())?;
-        embeddings.push(EmbeddingData {
-            object: "embedding",
-            embedding,
-            index: idx,
-        });
-        total_tokens += tokens;
-        
-        info!("Processed input {} (type: {}, tokens: {})", idx, input_type, tokens);
-    }
-
-    let response = EmbeddingResponse {
-        object: "list",
-        data: embeddings,
-        model: state.model_name.clone(),
-        usage: Usage {
-            prompt_tokens: total_tokens,
-            total_tokens,
-        },
-    };
-
-    let elapsed = start.elapsed();
-    info!(
-        "Embedding request completed: {} inputs, {} tokens, {}ms",
-        input_count,
-        total_tokens,
-        elapsed.as_millis()
-    );
-
-    Ok(Json(response))
-}
-
-fn process_single_input(
-    embedder: &Qwen3VLEmbedding,
-    input: InputContent,
-    instruction: Option<&str>,
-) -> Result<(Vec<f32>, usize), AppError> {
-    match input {
-        InputContent::Text { text } => {
-            let encoding = embedder
-                .tokenizer()
-                .encode(text.as_str(), true)
-                .map_err(|e| AppError(ErrorResponse::new(format!("Tokenization failed: {}", e))))?;
-            let token_count = encoding.len();
-
-            let instructions = vec![instruction.map(|s| s.to_string())];
-            let embeddings = embedder
-                .embed_texts_with_instructions(&[text], &instructions)
-                .map_err(|e| AppError(ErrorResponse::new(format!("Embedding failed: {}", e))))?;
-
-            Ok((
-                embeddings.into_iter().next().unwrap_or_default(),
-                token_count,
-            ))
-        }
-        InputContent::ImageUrl { image_url } => {
-            let (bytes, image) = decode_image_url(&image_url.url)?;
-            let token_count = estimate_image_tokens(&image, embedder.max_pixels());
-
-            let instructions = vec![instruction.map(|s| s.to_string())];
-            let embeddings = embedder
-                .embed_image_bytes_with_instructions(&[bytes.as_slice()], &instructions)
-                .map_err(|e| AppError(ErrorResponse::new(format!("Embedding failed: {}", e))))?;
-
-            Ok((
-                embeddings.into_iter().next().unwrap_or_default(),
-                token_count,
-            ))
-        }
-        InputContent::Video { video } => {
-            let frames = match video {
-                VideoInput::Frames(frame_contents) => {
-                    let mut frames = Vec::new();
-                    for frame_content in frame_contents {
-                        match frame_content {
-                            InputContent::ImageUrl { image_url } => {
-                                let (_, img) = decode_image_url(&image_url.url)?;
-                                frames.push(img);
-                            }
-                            InputContent::Text { text } => {
-                                return Err(AppError(ErrorResponse::new(format!(
-                                    "Video frames cannot contain text: {}",
-                                    text
-                                ))));
-                            }
-                            InputContent::Video { .. } => {
-                                return Err(AppError(ErrorResponse::new(
-                                    "Nested video inputs are not supported".to_string(),
-                                )));
-                            }
-                        }
-                    }
-                    frames
-                }
-                VideoInput::Url { url: _ } => {
-                    return Err(AppError(ErrorResponse::new(
-                        "Video URL downloading is not yet implemented. Please provide video as an array of image frames.".to_string(),
-                    )));
-                }
-            };
-
-            if frames.is_empty() {
-                return Err(AppError(ErrorResponse::new(
-                    "Video must contain at least one frame".to_string(),
-                )));
-            }
-
-            let token_count =
-                frames.len() * estimate_image_tokens(&frames[0], embedder.max_pixels());
-
-            let instructions = vec![instruction.map(|s| s.to_string())];
-            let embeddings = embedder
-                .embed_video_frames(&[frames], &instructions)
-                .map_err(|e| AppError(ErrorResponse::new(format!("Embedding failed: {}", e))))?;
-
-            Ok((
-                embeddings.into_iter().next().unwrap_or_default(),
-                token_count,
-            ))
-        }
-    }
+    Ok((embedding, total_tokens))
 }
 
 fn decode_image_url(url: &str) -> Result<(Vec<u8>, DynamicImage), AppError> {

@@ -1,20 +1,24 @@
 mod cli;
 mod download;
+mod metrics;
 mod models;
 mod utils;
 
 use clap::Parser;
 use cli::{Cli, Commands};
+use metrics::{InputType, MetricsBuilder, ModelInfo};
+use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::try_parse()?;
 
-    let (repo, quant) = match &cli.command {
-        Commands::TextEmbedding(args) => (&args.repo, &args.quant),
-        Commands::ImageEmbedding(args) => (&args.repo, &args.quant),
+    let (repo, quant, show_metrics) = match &cli.command {
+        Commands::TextEmbedding(args) => (&args.repo, &args.quant, args.metrics),
+        Commands::ImageEmbedding(args) => (&args.repo, &args.quant, args.metrics),
     };
 
     println!("Downloading model from Hugging Face...");
+    let load_start = Instant::now();
     let downloaded = download::download_model(repo, quant)?;
     println!("Model downloaded successfully!");
 
@@ -22,27 +26,48 @@ fn main() -> anyhow::Result<()> {
     let dtype = utils::get_device_dtype(&device)?;
 
     let mut embedder = models::qwen3::Qwen3VLEmbedding::from_gguf_and_mmproj(
-        downloaded.gguf_path,
-        downloaded.mmproj_path,
-        downloaded.config_dir,
+        &downloaded.gguf_path,
+        &downloaded.mmproj_path,
+        &downloaded.config_dir,
         &device,
         dtype,
     )?;
 
+    let model_load_time_ms = load_start.elapsed().as_millis() as u64;
+
     println!("Model loaded successfully!");
-    println!(
-        "Default max_pixels: {}, min_pixels: {}",
+
+    let model_info = ModelInfo::new(
+        repo.to_string(),
+        quant.to_string(),
+        format!("{:?}", device),
+        format!("{:?}", dtype),
+        embedder.config().hidden_size,
+        &downloaded.gguf_path,
+        &downloaded.mmproj_path,
         embedder.max_pixels(),
-        embedder.min_pixels()
+        embedder.min_pixels(),
     );
+    model_info.print();
 
     match cli.command {
         Commands::TextEmbedding(args) => {
             let input = utils::resolve_input(&args.input);
             let instruction = args.instruction.map(|i| utils::resolve_input(&i));
 
+            let encoding = embedder
+                .tokenizer()
+                .encode(input.as_str(), true)
+                .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+            let token_count = encoding.len();
+
+            let builder =
+                MetricsBuilder::new(InputType::Text).with_model_load_time(model_load_time_ms);
+
             let embeddings =
                 embedder.embed_texts_with_instructions(&[input], &[instruction.as_deref()])?;
+
+            let metrics = builder.finish_with_tokens(embeddings.len(), token_count);
 
             for (i, emb) in embeddings.iter().enumerate() {
                 println!(
@@ -56,9 +81,12 @@ fn main() -> anyhow::Result<()> {
                     emb[4]
                 );
             }
+
+            if show_metrics {
+                print!("{}", metrics.format_human());
+            }
         }
         Commands::ImageEmbedding(args) => {
-            // Apply custom pixel settings if provided
             if let Some(max_pixels) = args.max_pixels {
                 embedder.set_max_pixels(max_pixels);
                 println!("Using max_pixels: {}", max_pixels);
@@ -79,7 +107,12 @@ fn main() -> anyhow::Result<()> {
             let instructions: Vec<Option<String>> =
                 files.iter().map(|_| instruction.clone()).collect();
 
+            let builder =
+                MetricsBuilder::new(InputType::Image).with_model_load_time(model_load_time_ms);
+
             let embeddings = embedder.embed_images_with_instructions(&files, &instructions)?;
+
+            let metrics = builder.finish(embeddings.len());
 
             for (i, emb) in embeddings.iter().enumerate() {
                 println!(
@@ -92,6 +125,10 @@ fn main() -> anyhow::Result<()> {
                     emb[3],
                     emb[4]
                 );
+            }
+
+            if show_metrics {
+                print!("{}", metrics.format_human());
             }
         }
     }

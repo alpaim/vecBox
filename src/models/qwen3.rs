@@ -1956,6 +1956,10 @@ impl Qwen3VLEmbedding {
         self.model.device()
     }
 
+    pub fn tokenizer(&self) -> &tokenizers::Tokenizer {
+        &self.tokenizer
+    }
+
     pub fn max_pixels(&self) -> usize {
         self.preprocessor.max_pixels
     }

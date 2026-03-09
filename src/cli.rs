@@ -1,9 +1,20 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "vecbox")]
 #[command(about = "Embedding tool for text and images using Qwen3-VL", long_about = None)]
 pub struct Cli {
+    #[arg(
+        long,
+        default_value = "info",
+        help = "Log level: error, warn, info, debug, trace"
+    )]
+    pub log_level: String,
+
+    #[arg(long, help = "Log file path (optional, logs to stdout by default)")]
+    pub log_file: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

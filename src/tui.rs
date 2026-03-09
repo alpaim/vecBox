@@ -4,7 +4,7 @@ use crossterm::{
         KeyModifiers,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Frame, Terminal,
@@ -107,7 +107,10 @@ pub fn run_wizard() -> anyhow::Result<()> {
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
+
     terminal.show_cursor()?;
+
+    execute!(terminal.backend_mut(), Clear(ClearType::All))?;
 
     if let Err(err) = res {
         eprintln!("Error: {}", err);
@@ -250,7 +253,7 @@ fn handle_input(key: KeyEvent, state: &mut State) -> anyhow::Result<()> {
         Step::Summary => match key.code {
             KeyCode::Enter => {
                 start_server(state)?;
-                state.step = Step::Running;
+                return Ok(());
             }
             KeyCode::Esc => state.step = Step::ServerConfig,
             _ => {}

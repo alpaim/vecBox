@@ -1,10 +1,88 @@
 use serde::Serialize;
+use std::path::Path;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum InputType {
     Text,
     Image,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelInfo {
+    pub repo: String,
+    pub quant: String,
+    pub device: String,
+    pub dtype: String,
+    pub embedding_dim: usize,
+    pub text_model_name: String,
+    pub vision_model_name: String,
+    pub text_model_size_mb: f64,
+    pub vision_model_size_mb: f64,
+    pub max_pixels: usize,
+    pub min_pixels: usize,
+}
+
+impl ModelInfo {
+    pub fn new(
+        repo: String,
+        quant: String,
+        device: String,
+        dtype: String,
+        embedding_dim: usize,
+        text_model_path: &Path,
+        vision_model_path: &Path,
+        max_pixels: usize,
+        min_pixels: usize,
+    ) -> Self {
+        let text_model_name = text_model_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let vision_model_name = vision_model_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let text_model_size_mb = std::fs::metadata(text_model_path)
+            .map(|m| m.len() as f64 / 1_048_576.0)
+            .unwrap_or(0.0);
+        let vision_model_size_mb = std::fs::metadata(vision_model_path)
+            .map(|m| m.len() as f64 / 1_048_576.0)
+            .unwrap_or(0.0);
+
+        Self {
+            repo,
+            quant,
+            device,
+            dtype,
+            embedding_dim,
+            text_model_name,
+            vision_model_name,
+            text_model_size_mb,
+            vision_model_size_mb,
+            max_pixels,
+            min_pixels,
+        }
+    }
+
+    pub fn print(&self) {
+        println!("\n--- Model Info ---");
+        println!("Repo:           {}", self.repo);
+        println!("Quantization:   {}", self.quant);
+        println!("Device:         {}", self.device);
+        println!("Dtype:          {}", self.dtype);
+        println!("Embedding dim:  {}", self.embedding_dim);
+        println!(
+            "Text model:     {} ({:.1} MB)",
+            self.text_model_name, self.text_model_size_mb
+        );
+        println!(
+            "Vision model:   {} ({:.1} MB)",
+            self.vision_model_name, self.vision_model_size_mb
+        );
+        println!("Pixels range:   {} - {}", self.min_pixels, self.max_pixels);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

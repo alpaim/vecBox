@@ -14,6 +14,8 @@ pub enum Commands {
     TextEmbedding(TextEmbeddingArgs),
     #[command(name = "image-embedding")]
     ImageEmbedding(ImageEmbeddingArgs),
+    #[command(name = "server")]
+    Server(ServerArgs),
 }
 
 #[derive(clap::Args)]
@@ -75,4 +77,36 @@ pub struct ImageEmbeddingArgs {
 
     #[arg(long, default_value = "true", help = "Show performance metrics")]
     pub metrics: bool,
+}
+
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct ServerArgs {
+    #[arg(
+        long,
+        help = "Hugging Face repo ID (e.g., 'alpaim/Qwen3-VL-Embedding-2B-GGUF-vecBox')"
+    )]
+    pub repo: String,
+
+    #[arg(
+        long,
+        default_value = "Q4_K_M",
+        help = "GGUF quant to download (e.g., Q4_K_M, Q8_0)"
+    )]
+    pub quant: String,
+
+    #[arg(long, default_value = "0.0.0.0", help = "Host to bind the server to")]
+    pub host: String,
+
+    #[arg(long, default_value = "8080", help = "Port to bind the server to")]
+    pub port: u16,
+
+    #[arg(
+        long,
+        help = "Maximum pixels for image resizing (e.g., 786432 for 768x1024)"
+    )]
+    pub max_pixels: Option<usize>,
+
+    #[arg(long, help = "Minimum pixels for image resizing")]
+    pub min_pixels: Option<usize>,
 }

@@ -1,6 +1,7 @@
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -123,6 +124,9 @@ fn run_loop(
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(());
+                }
                 handle_input(key, state)?;
             }
         }
@@ -137,6 +141,7 @@ fn handle_input(key: KeyEvent, state: &mut State) -> anyhow::Result<()> {
     match state.step {
         Step::Welcome => match key.code {
             KeyCode::Enter => state.step = Step::ModelSelection,
+            KeyCode::Esc => return Ok(()),
             _ => {}
         },
         Step::ModelSelection => match key.code {

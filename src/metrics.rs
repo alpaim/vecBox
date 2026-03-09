@@ -222,7 +222,7 @@ impl Metrics {
             self.input_tokens_per_second,
             self.avg_tokens_per_sample,
         ) {
-            output.push_str(&format!("\nTokens:         {} total\n", total_tokens));
+            output.push_str(&format!("\nInput Tokens:         {} total\n", total_tokens));
             output.push_str(&format!("Input tok/s:   {:.2}\n", toks_per_sec));
             output.push_str(&format!("Avg tokens:     {:.2}/sample\n", avg_toks));
         }

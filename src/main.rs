@@ -1,6 +1,7 @@
 mod api;
 mod cli;
 mod download;
+mod logging;
 mod metrics;
 mod models;
 mod utils;
@@ -10,10 +11,13 @@ use cli::{Cli, Commands};
 use metrics::{InputType, MetricsBuilder, ModelInfo};
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::try_parse()?;
+
+    let _guard = logging::init_logging(&cli.log_level, cli.log_file.clone());
 
     match &cli.command {
         Commands::Server(args) => {
@@ -34,10 +38,10 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
         Commands::Server(_) => unreachable!(),
     };
 
-    println!("Downloading model from Hugging Face...");
+    info!("Downloading model from Hugging Face...");
     let load_start = Instant::now();
     let downloaded = download::download_model(repo, quant)?;
-    println!("Model downloaded successfully!");
+    info!("Model downloaded successfully!");
 
     let device = utils::get_device()?;
     let dtype = utils::get_device_dtype(&device)?;
@@ -52,7 +56,7 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
 
     let model_load_time_ms = load_start.elapsed().as_millis() as u64;
 
-    println!("Model loaded successfully!");
+    info!("Model loaded successfully!");
 
     let model_info = ModelInfo::new(
         repo.to_string(),
@@ -106,11 +110,11 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
         Commands::ImageEmbedding(args) => {
             if let Some(max_pixels) = args.max_pixels {
                 embedder.set_max_pixels(max_pixels);
-                println!("Using max_pixels: {}", max_pixels);
+                info!("Using max_pixels: {}", max_pixels);
             }
             if let Some(min_pixels) = args.min_pixels {
                 embedder.set_min_pixels(min_pixels);
-                println!("Using min_pixels: {}", min_pixels);
+                info!("Using min_pixels: {}", min_pixels);
             }
 
             let instruction = args.instruction.as_ref().map(|i| utils::resolve_input(i));
@@ -118,7 +122,7 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
             let files = utils::get_files_from_directory(&args.input);
 
             for file in &files {
-                println!("Processing: {}", file);
+                info!("Processing: {}", file);
             }
 
             let instructions: Vec<Option<&str>> =
@@ -155,9 +159,9 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
 }
 
 async fn run_server(args: &cli::ServerArgs) -> anyhow::Result<()> {
-    println!("Downloading model from Hugging Face...");
+    info!("Downloading model from Hugging Face...");
     let downloaded = download::download_model(&args.repo, &args.quant)?;
-    println!("Model downloaded successfully!");
+    info!("Model downloaded successfully!");
 
     let device = utils::get_device()?;
     let dtype = utils::get_device_dtype(&device)?;
@@ -172,15 +176,15 @@ async fn run_server(args: &cli::ServerArgs) -> anyhow::Result<()> {
 
     if let Some(max_pixels) = args.max_pixels {
         embedder.set_max_pixels(max_pixels);
-        println!("Using max_pixels: {}", max_pixels);
+        info!("Using max_pixels: {}", max_pixels);
     }
     if let Some(min_pixels) = args.min_pixels {
         embedder.set_min_pixels(min_pixels);
-        println!("Using min_pixels: {}", min_pixels);
+        info!("Using min_pixels: {}", min_pixels);
     }
 
-    println!("Model loaded successfully!");
-    println!(
+    info!("Model loaded successfully!");
+    info!(
         "Model: {} (hidden_size: {})",
         args.repo,
         embedder.config().hidden_size

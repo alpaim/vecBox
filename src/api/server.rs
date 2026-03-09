@@ -1,5 +1,6 @@
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     Json,
@@ -10,6 +11,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use image::DynamicImage;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::{error, info, warn};
 
 use crate::api::schema::{
     EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse, ErrorResponse,
@@ -36,7 +38,7 @@ pub async fn run_server(state: AppState, host: &str, port: u16) -> anyhow::Resul
 
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    println!("Server listening on {}", addr);
+    info!("Server listening on {}", addr);
 
     axum::serve(listener, app).await?;
 
@@ -51,12 +53,24 @@ pub async fn create_embedding(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EmbeddingRequest>,
 ) -> Result<Json<EmbeddingResponse>, AppError> {
+    let start = Instant::now();
+    let input_count = match &req.input {
+        EmbeddingInput::Single(_) => 1,
+        EmbeddingInput::Multiple(v) => v.len(),
+    };
+
+    info!(
+        "Embedding request: {} input(s), model: {}",
+        input_count, state.model_name
+    );
+
     let inputs = match req.input {
         EmbeddingInput::Single(content) => vec![content],
         EmbeddingInput::Multiple(contents) => contents,
     };
 
     if inputs.is_empty() {
+        warn!("Empty embedding request received");
         return Err(AppError(ErrorResponse::new(
             "Input cannot be empty".to_string(),
         )));
@@ -67,6 +81,12 @@ pub async fn create_embedding(
     let mut total_tokens = 0usize;
 
     for (idx, input) in inputs.into_iter().enumerate() {
+        let input_type = match &input {
+            InputContent::Text { .. } => "text",
+            InputContent::ImageUrl { .. } => "image",
+            InputContent::Video { .. } => "video",
+        };
+        
         let (embedding, tokens) =
             process_single_input(&state.embedder, input, instruction.as_deref())?;
         embeddings.push(EmbeddingData {
@@ -75,6 +95,8 @@ pub async fn create_embedding(
             index: idx,
         });
         total_tokens += tokens;
+        
+        info!("Processed input {} (type: {}, tokens: {})", idx, input_type, tokens);
     }
 
     let response = EmbeddingResponse {
@@ -86,6 +108,14 @@ pub async fn create_embedding(
             total_tokens,
         },
     };
+
+    let elapsed = start.elapsed();
+    info!(
+        "Embedding request completed: {} inputs, {} tokens, {}ms",
+        input_count,
+        total_tokens,
+        elapsed.as_millis()
+    );
 
     Ok(Json(response))
 }
@@ -246,6 +276,8 @@ pub struct AppError(ErrorResponse);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        let msg = self.0.error.message.clone();
+        error!("Embedding request failed: {}", msg);
         (StatusCode::BAD_REQUEST, Json(self.0)).into_response()
     }
 }

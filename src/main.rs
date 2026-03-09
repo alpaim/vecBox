@@ -1,10 +1,9 @@
 mod api;
 mod cli;
-mod download;
 mod logging;
 mod metrics;
-mod models;
-mod utils;
+
+use vecbox_core::{download, models, utils};
 
 use clap::Parser;
 use cli::{Cli, Commands};

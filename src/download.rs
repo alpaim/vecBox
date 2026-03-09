@@ -1,5 +1,6 @@
 use hf_hub::api::sync::ApiBuilder;
 use std::path::PathBuf;
+use tracing::{error, info, warn};
 
 pub struct DownloadedModel {
     pub gguf_path: PathBuf,
@@ -8,16 +9,19 @@ pub struct DownloadedModel {
 }
 
 pub fn download_model(repo_id: &str, quant: &str) -> anyhow::Result<DownloadedModel> {
-    let api = ApiBuilder::new()
-        .with_progress(true)
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create HF API: {}", e))?;
+    info!("Starting model download: repo={}, quant={}", repo_id, quant);
+
+    let api = ApiBuilder::new().with_progress(true).build().map_err(|e| {
+        error!("Failed to create HF API: {}", e);
+        anyhow::anyhow!("Failed to create HF API: {}", e)
+    })?;
 
     let repo = api.model(repo_id.to_string());
 
-    let info = repo
-        .info()
-        .map_err(|e| anyhow::anyhow!("Failed to get repo info: {}", e))?;
+    let info = repo.info().map_err(|e| {
+        error!("Failed to get repo info: {}", e);
+        anyhow::anyhow!("Failed to get repo info: {}", e)
+    })?;
 
     let mut gguf_file: Option<PathBuf> = None;
     let mut mmproj_file: Option<PathBuf> = None;
@@ -39,20 +43,31 @@ pub fn download_model(repo_id: &str, quant: &str) -> anyhow::Result<DownloadedMo
         };
 
         if should_download {
-            let local_path = repo
-                .get(&filename)
-                .map_err(|e| anyhow::anyhow!("Failed to download {}: {}", filename, e))?;
+            info!("Downloading: {}", filename);
+            let local_path = repo.get(&filename).map_err(|e| {
+                error!("Failed to download {}: {}", filename, e);
+                anyhow::anyhow!("Failed to download {}: {}", filename, e)
+            })?;
 
             if filename.ends_with(".gguf") {
                 if filename.contains("mmproj") {
                     mmproj_file = Some(local_path.clone());
+                    info!("Downloaded mmproj: {}", filename);
                 } else if filename.contains(quant) {
                     gguf_file = Some(local_path.clone());
+                    info!("Downloaded GGUF: {}", filename);
                 }
             } else {
                 config_files.push(local_path);
             }
         }
+    }
+
+    if gguf_file.is_none() {
+        error!("No GGUF file found for quant: {}", quant);
+    }
+    if mmproj_file.is_none() {
+        warn!("No mmproj file found in repository");
     }
 
     let gguf_path =
@@ -72,6 +87,13 @@ pub fn download_model(repo_id: &str, quant: &str) -> anyhow::Result<DownloadedMo
             .map(|p| p.to_path_buf())
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
     };
+
+    info!(
+        "Model download complete: gguf={}, mmproj={}, config_dir={}",
+        gguf_path.display(),
+        mmproj_path.display(),
+        config_dir.display()
+    );
 
     Ok(DownloadedModel {
         gguf_path,

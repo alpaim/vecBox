@@ -37,6 +37,9 @@ pub struct TextEmbeddingArgs {
 
     #[arg(long, help = "Instruction text or path to instruction file")]
     pub instruction: Option<String>,
+
+    #[arg(long, default_value = "true", help = "Show performance metrics")]
+    pub metrics: bool,
 }
 
 #[derive(clap::Args)]
@@ -69,4 +72,7 @@ pub struct ImageEmbeddingArgs {
 
     #[arg(long, help = "Minimum pixels for image resizing")]
     pub min_pixels: Option<usize>,
+
+    #[arg(long, default_value = "true", help = "Show performance metrics")]
+    pub metrics: bool,
 }

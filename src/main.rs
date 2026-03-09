@@ -1,3 +1,4 @@
+mod api;
 mod cli;
 mod download;
 mod metrics;
@@ -7,14 +8,30 @@ mod utils;
 use clap::Parser;
 use cli::{Cli, Commands};
 use metrics::{InputType, MetricsBuilder, ModelInfo};
+use std::sync::Arc;
 use std::time::Instant;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::try_parse()?;
 
+    match &cli.command {
+        Commands::Server(args) => {
+            run_server(args).await?;
+        }
+        _ => {
+            run_embedding_command(&cli)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
     let (repo, quant, show_metrics) = match &cli.command {
         Commands::TextEmbedding(args) => (&args.repo, &args.quant, args.metrics),
         Commands::ImageEmbedding(args) => (&args.repo, &args.quant, args.metrics),
+        Commands::Server(_) => unreachable!(),
     };
 
     println!("Downloading model from Hugging Face...");
@@ -50,10 +67,10 @@ fn main() -> anyhow::Result<()> {
     );
     model_info.print();
 
-    match cli.command {
+    match &cli.command {
         Commands::TextEmbedding(args) => {
             let input = utils::resolve_input(&args.input);
-            let instruction = args.instruction.map(|i| utils::resolve_input(&i));
+            let instruction = args.instruction.as_ref().map(|i| utils::resolve_input(i));
 
             let encoding = embedder
                 .tokenizer()
@@ -65,7 +82,7 @@ fn main() -> anyhow::Result<()> {
                 MetricsBuilder::new(InputType::Text).with_model_load_time(model_load_time_ms);
 
             let embeddings =
-                embedder.embed_texts_with_instructions(&[input], &[instruction.as_deref()])?;
+                embedder.embed_texts_with_instructions(&[&input], &[instruction.as_deref()])?;
 
             let metrics = builder.finish_with_tokens(embeddings.len(), token_count);
 
@@ -96,7 +113,7 @@ fn main() -> anyhow::Result<()> {
                 println!("Using min_pixels: {}", min_pixels);
             }
 
-            let instruction = args.instruction.map(|i| utils::resolve_input(&i));
+            let instruction = args.instruction.as_ref().map(|i| utils::resolve_input(i));
 
             let files = utils::get_files_from_directory(&args.input);
 
@@ -104,8 +121,8 @@ fn main() -> anyhow::Result<()> {
                 println!("Processing: {}", file);
             }
 
-            let instructions: Vec<Option<String>> =
-                files.iter().map(|_| instruction.clone()).collect();
+            let instructions: Vec<Option<&str>> =
+                files.iter().map(|_| instruction.as_deref()).collect();
 
             let builder =
                 MetricsBuilder::new(InputType::Image).with_model_load_time(model_load_time_ms);
@@ -131,7 +148,49 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", metrics.format_human());
             }
         }
+        Commands::Server(_) => unreachable!(),
     }
 
     Ok(())
+}
+
+async fn run_server(args: &cli::ServerArgs) -> anyhow::Result<()> {
+    println!("Downloading model from Hugging Face...");
+    let downloaded = download::download_model(&args.repo, &args.quant)?;
+    println!("Model downloaded successfully!");
+
+    let device = utils::get_device()?;
+    let dtype = utils::get_device_dtype(&device)?;
+
+    let mut embedder = models::qwen3::Qwen3VLEmbedding::from_gguf_and_mmproj(
+        &downloaded.gguf_path,
+        &downloaded.mmproj_path,
+        &downloaded.config_dir,
+        &device,
+        dtype,
+    )?;
+
+    if let Some(max_pixels) = args.max_pixels {
+        embedder.set_max_pixels(max_pixels);
+        println!("Using max_pixels: {}", max_pixels);
+    }
+    if let Some(min_pixels) = args.min_pixels {
+        embedder.set_min_pixels(min_pixels);
+        println!("Using min_pixels: {}", min_pixels);
+    }
+
+    println!("Model loaded successfully!");
+    println!(
+        "Model: {} (hidden_size: {})",
+        args.repo,
+        embedder.config().hidden_size
+    );
+
+    let model_name = format!("{}-{}", args.repo, args.quant);
+    let state = api::AppState {
+        embedder: Arc::new(embedder),
+        model_name,
+    };
+
+    api::run_server(state, &args.host, args.port).await
 }

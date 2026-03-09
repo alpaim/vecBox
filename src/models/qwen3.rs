@@ -2162,6 +2162,37 @@ impl Qwen3VLEmbedding {
         self.embed_internal(text_inputs, image_inputs, instructions)
     }
 
+    /// Embed a batch of image bytes with custom instructions for each.
+    pub fn embed_image_bytes_with_instructions<S: AsRef<str>>(
+        &self,
+        images: &[&[u8]],
+        instructions: &[Option<S>],
+    ) -> Result<Vec<Vec<f32>>> {
+        if images.len() != instructions.len() {
+            return Err(candle_core::Error::Msg(
+                "images and instructions must have the same length".into(),
+            ));
+        }
+
+        let mut image_inputs = Vec::with_capacity(images.len());
+        for bytes in images {
+            let image = image::ImageReader::new(Cursor::new(bytes))
+                .with_guessed_format()
+                .map_err(map_err)?
+                .decode()
+                .map_err(map_err)?;
+            image_inputs.push(Some(image));
+        }
+        let text_inputs: Vec<Option<String>> = (0..images.len()).map(|_| None).collect();
+
+        let inst_inputs: Vec<Option<String>> = instructions
+            .iter()
+            .map(|inst| inst.as_ref().map(|s| s.as_ref().to_string()))
+            .collect();
+
+        self.embed_internal(text_inputs, image_inputs, inst_inputs)
+    }
+
     fn run_inference_on_prepared(
         &self,
         prompts: Vec<String>,

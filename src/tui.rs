@@ -110,8 +110,6 @@ pub fn run_wizard() -> anyhow::Result<()> {
 
     terminal.show_cursor()?;
 
-    execute!(terminal.backend_mut(), Clear(ClearType::All))?;
-
     if let Err(err) = res {
         eprintln!("Error: {}", err);
     }
@@ -370,7 +368,7 @@ fn render_welcome(frame: &mut Frame, area: ratatui::layout::Rect) {
         Paragraph::new("vecBox")
             .style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )
             .alignment(Alignment::Center),
@@ -378,8 +376,8 @@ fn render_welcome(frame: &mut Frame, area: ratatui::layout::Rect) {
     );
 
     frame.render_widget(
-        Paragraph::new("Multimodal Embedding Server")
-            .style(Style::default().fg(Color::LightBlue))
+        Paragraph::new("All-in-one inference box for vec* family projects")
+            .style(Style::default().fg(Color::White))
             .alignment(Alignment::Center),
         chunks[1],
     );

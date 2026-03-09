@@ -25,7 +25,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Tui => {
             tui::run_wizard()?;
-            println!("Server started in background. Check logs above for details.");
         }
         _ => {
             run_embedding_command(&cli)?;

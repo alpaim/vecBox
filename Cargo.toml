@@ -12,7 +12,7 @@ accelerate = ["vecbox-core/accelerate"]
 mkl = ["vecbox-core/mkl"]
 
 [dependencies]
-vecbox-core = { git = "https://github.com/alpaim/vecbox-core.git", tag = "v0.1.1" }
+vecbox-core = { git = "https://github.com/alpaim/vecbox-core.git", tag = "v0.1.2" }
 
 anyhow = { version = "1" }
 

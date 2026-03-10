@@ -458,6 +458,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-flash-attn"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c94ddd2e7bb828777b0a8d999ed40d2d6c3c96c9ef2a3111a69e0d96efc436d2"
+dependencies = [
+ "anyhow",
+ "bindgen_cuda",
+ "candle-core",
+ "candle-flash-attn-build",
+ "half",
+]
+
+[[package]]
+name = "candle-flash-attn-build"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bd79da06f2a3b831cb4f5a1ee393d6f2c5a913e28f5000c678a84108519a78c"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "candle-kernels"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5005,13 +5027,14 @@ dependencies = [
 
 [[package]]
 name = "vecbox-core"
-version = "0.1.0"
-source = "git+https://github.com/alpaim/vecbox-core.git?tag=v0.1.1#6fb3025e4ff20f1a893c413b7dff7fe293e3fda4"
+version = "0.1.2"
+source = "git+https://github.com/alpaim/vecbox-core.git?tag=v0.1.2#2e96a03cf9f56fc5a248149e438e984af8147f79"
 dependencies = [
  "accelerate-src",
  "anyhow",
  "base64 0.22.1",
  "candle-core",
+ "candle-flash-attn",
  "candle-nn",
  "hf-hub",
  "image",

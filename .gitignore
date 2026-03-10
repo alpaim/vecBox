@@ -6,11 +6,3 @@ _models
 # test inputs
 _inputs
 
-ref
-aha-src
-vllm-rs-src
-test-py
-
-AGENTS.md
-PR.md
-PR_ref.md

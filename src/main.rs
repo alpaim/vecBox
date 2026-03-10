@@ -2,6 +2,7 @@ mod api;
 mod cli;
 mod logging;
 mod metrics;
+mod tui;
 
 use vecbox_core::{download, models, utils};
 
@@ -22,6 +23,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Server(args) => {
             run_server(args).await?;
         }
+        Commands::Tui => {
+            tui::run_wizard()?;
+        }
         _ => {
             run_embedding_command(&cli)?;
         }
@@ -35,6 +39,7 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
         Commands::TextEmbedding(args) => (&args.repo, &args.quant, args.metrics),
         Commands::ImageEmbedding(args) => (&args.repo, &args.quant, args.metrics),
         Commands::Server(_) => unreachable!(),
+        Commands::Tui => unreachable!(),
     };
 
     info!("Downloading model from Hugging Face...");
@@ -152,6 +157,7 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
             }
         }
         Commands::Server(_) => unreachable!(),
+        Commands::Tui => unreachable!(),
     }
 
     Ok(())

@@ -27,6 +27,8 @@ pub enum Commands {
     ImageEmbedding(ImageEmbeddingArgs),
     #[command(name = "server")]
     Server(ServerArgs),
+    #[command(name = "tui")]
+    Tui,
 }
 
 #[derive(clap::Args)]

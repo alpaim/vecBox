@@ -12,7 +12,7 @@ accelerate = ["vecbox-core/accelerate"]
 mkl = ["vecbox-core/mkl"]
 
 [dependencies]
-vecbox-core = { git = "https://github.com/alpaim/vecbox-core.git", tag = "v0.1.0" }
+vecbox-core = { git = "https://github.com/alpaim/vecbox-core.git", tag = "v0.1.1" }
 
 anyhow = { version = "1" }
 
@@ -27,6 +27,9 @@ clap = { version = "4.5.60", features = ["derive"] }
 dirs = "5"
 
 tokio = { version = "1.50.0", features = ["full"] }
+
+ratatui = "0.30.0"
+crossterm = "0.28"
 
 axum = "0.8.8"
 

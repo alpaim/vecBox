@@ -5005,8 +5005,8 @@ dependencies = [
 
 [[package]]
 name = "vecbox-core"
-version = "0.1.1"
-source = "git+https://github.com/alpaim/vecbox-core.git?tag=v0.1.1#7e64a53c6418e7c00df9939887e7ca6235d6e513"
+version = "0.1.2"
+source = "git+https://github.com/alpaim/vecbox-core.git?tag=v0.1.2#2c74d3a5b4feb9d30a905a7803d9c3cc157053df"
 dependencies = [
  "accelerate-src",
  "anyhow",

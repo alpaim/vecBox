@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -28,6 +28,7 @@ pub async fn run_server(state: AppState, host: &str, port: u16) -> anyhow::Resul
     let app = axum::Router::new()
         .route("/v1/embeddings", axum::routing::post(create_embedding))
         .route("/health", axum::routing::get(health_check))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // Set max body size to 50MB
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

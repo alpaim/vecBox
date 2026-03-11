@@ -38,8 +38,7 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
     let (repo, quant, show_metrics) = match &cli.command {
         Commands::TextEmbedding(args) => (&args.repo, &args.quant, args.metrics),
         Commands::ImageEmbedding(args) => (&args.repo, &args.quant, args.metrics),
-        Commands::Server(_) => unreachable!(),
-        Commands::Tui => unreachable!(),
+        Commands::Server(_) | Commands::Tui => unreachable!(),
     };
 
     info!("Downloading model from Hugging Face...");
@@ -83,7 +82,7 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
             let encoding = embedder
                 .tokenizer()
                 .encode(input.as_str(), true)
-                .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Tokenization failed: {e}"))?;
             let token_count = encoding.len();
 
             let builder =
@@ -156,8 +155,7 @@ fn run_embedding_command(cli: &Cli) -> anyhow::Result<()> {
                 print!("{}", metrics.format_human());
             }
         }
-        Commands::Server(_) => unreachable!(),
-        Commands::Tui => unreachable!(),
+        Commands::Server(_) | Commands::Tui => unreachable!(),
     }
 
     Ok(())

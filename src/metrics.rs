@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
@@ -198,43 +199,48 @@ impl MetricsBuilder {
 
 impl Metrics {
     pub fn format_human(&self) -> String {
-        let mut output = String::new();
-        output.push_str("\n--- Embedding Metrics ---\n");
+        let mut output = Vec::new();
+
+        writeln!(&mut output, "\n--- Embedding Metrics ---").unwrap();
 
         let type_str = match self.input_type {
             InputType::Text => "Text",
             InputType::Image => "Image",
         };
-        output.push_str(&format!("Type:           {}\n", type_str));
-        output.push_str(&format!("Samples:        {}\n", self.samples_processed));
-        output.push_str(&format!("Total time:     {} ms\n", self.total_time_ms));
-        output.push_str(&format!(
-            "Throughput:     {:.2} samples/sec\n",
+        writeln!(&mut output, "Type:           {type_str}").unwrap();
+        writeln!(&mut output, "Samples:        {}", self.samples_processed).unwrap();
+        writeln!(&mut output, "Total time:     {} ms", self.total_time_ms).unwrap();
+        writeln!(
+            &mut output,
+            "Throughput:     {:.2} samples/sec",
             self.samples_per_second
-        ));
-        output.push_str(&format!(
-            "Avg/sample:     {:.2} ms\n",
+        )
+        .unwrap();
+        writeln!(
+            &mut output,
+            "Avg/sample:     {:.2} ms",
             self.avg_time_per_sample_ms
-        ));
+        )
+        .unwrap();
 
         if let (Some(total_tokens), Some(toks_per_sec), Some(avg_toks)) = (
             self.total_tokens,
             self.input_tokens_per_second,
             self.avg_tokens_per_sample,
         ) {
-            output.push_str(&format!("\nInput Tokens:         {} total\n", total_tokens));
-            output.push_str(&format!("Input tok/s:   {:.2}\n", toks_per_sec));
-            output.push_str(&format!("Avg tokens:     {:.2}/sample\n", avg_toks));
+            writeln!(&mut output, "\nInput Tokens:         {total_tokens} total").unwrap();
+            writeln!(&mut output, "Input tok/s:   {toks_per_sec:.2}").unwrap();
+            writeln!(&mut output, "Avg tokens:     {avg_toks:.2}/sample").unwrap();
         }
 
         if let (Some(total_images), Some(avg_img_time)) =
             (self.total_images, self.avg_time_per_image_ms)
         {
-            output.push_str(&format!("\nImages:         {} total\n", total_images));
-            output.push_str(&format!("Avg/image:      {:.2} ms\n", avg_img_time));
+            writeln!(&mut output, "\nImages:         {total_images} total").unwrap();
+            writeln!(&mut output, "Avg/image:      {avg_img_time:.2} ms").unwrap();
         }
 
-        output
+        String::from_utf8(output).unwrap()
     }
 
     pub fn to_json(&self) -> anyhow::Result<String> {

@@ -4,7 +4,7 @@ use crossterm::{
         KeyModifiers,
     },
     execute,
-    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Frame, Terminal,
@@ -15,8 +15,6 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 use std::io;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::api;
@@ -35,7 +33,6 @@ pub struct AppState {
     pub port: u16,
     pub max_pixels: Option<usize>,
     pub min_pixels: Option<usize>,
-    pub server_running: Arc<AtomicBool>,
 }
 
 impl Default for AppState {
@@ -47,7 +44,6 @@ impl Default for AppState {
             port: 8080,
             max_pixels: None,
             min_pixels: None,
-            server_running: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -58,7 +54,6 @@ pub enum Step {
     QuantSelection,
     ServerConfig,
     Summary,
-    Running,
 }
 
 pub struct State {
@@ -111,7 +106,7 @@ pub fn run_wizard() -> anyhow::Result<()> {
     terminal.show_cursor()?;
 
     if let Err(err) = res {
-        eprintln!("Error: {}", err);
+        eprintln!("Error: {err}");
     }
     Ok(())
 }
@@ -131,13 +126,10 @@ fn run_loop(
                 handle_input(key, state)?;
             }
         }
-
-        if matches!(state.step, Step::Running) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_input(key: KeyEvent, state: &mut State) -> anyhow::Result<()> {
     match state.step {
         Step::Welcome => match key.code {
@@ -148,12 +140,12 @@ fn handle_input(key: KeyEvent, state: &mut State) -> anyhow::Result<()> {
         Step::ModelSelection => match key.code {
             KeyCode::Up => {
                 if state.selected > 0 {
-                    state.selected -= 1
+                    state.selected -= 1;
                 }
             }
             KeyCode::Down => {
                 if state.selected < MODELS.len() - 1 {
-                    state.selected += 1
+                    state.selected += 1;
                 }
             }
             KeyCode::Enter => {
@@ -172,12 +164,12 @@ fn handle_input(key: KeyEvent, state: &mut State) -> anyhow::Result<()> {
         Step::QuantSelection => match key.code {
             KeyCode::Up => {
                 if state.selected > 0 {
-                    state.selected -= 1
+                    state.selected -= 1;
                 }
             }
             KeyCode::Down => {
                 if state.selected < state.quants.len().saturating_sub(1) {
-                    state.selected += 1
+                    state.selected += 1;
                 }
             }
             KeyCode::Enter => {
@@ -196,12 +188,12 @@ fn handle_input(key: KeyEvent, state: &mut State) -> anyhow::Result<()> {
         Step::ServerConfig => match key.code {
             KeyCode::Up => {
                 if state.field > 0 {
-                    state.field -= 1
+                    state.field -= 1;
                 }
             }
             KeyCode::Down => {
                 if state.field < 3 {
-                    state.field += 1
+                    state.field += 1;
                 }
             }
             KeyCode::Char(c) => match state.field {
@@ -250,17 +242,10 @@ fn handle_input(key: KeyEvent, state: &mut State) -> anyhow::Result<()> {
         },
         Step::Summary => match key.code {
             KeyCode::Enter => {
-                start_server(state)?;
+                start_server(state);
                 return Ok(());
             }
             KeyCode::Esc => state.step = Step::ServerConfig,
-            _ => {}
-        },
-        Step::Running => match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                state.app.server_running.store(false, Ordering::SeqCst);
-                state.step = Step::Summary;
-            }
             _ => {}
         },
     }
@@ -272,18 +257,17 @@ fn fetch_quants(state: &mut State) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn start_server(state: &mut State) -> anyhow::Result<()> {
+fn start_server(state: &mut State) {
     let app = state.app.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             if let Err(e) = run_server(app).await {
-                eprintln!("Server error: {}", e);
+                eprintln!("Server error: {e}");
             }
         });
     });
     std::thread::sleep(Duration::from_millis(500));
-    Ok(())
 }
 
 async fn run_server(app: AppState) -> anyhow::Result<()> {
@@ -328,7 +312,6 @@ fn render(frame: &mut Frame, state: &mut State) {
             Step::QuantSelection => " Select Quantization ",
             Step::ServerConfig => " Server Configuration ",
             Step::Summary => " Summary ",
-            Step::Running => " Server Running ",
         });
 
     let inner =
@@ -342,16 +325,14 @@ fn render(frame: &mut Frame, state: &mut State) {
         Step::QuantSelection => render_quant_list(frame, inner[0], state),
         Step::ServerConfig => render_config_form(frame, inner[0], state),
         Step::Summary => render_summary(frame, inner[0], state),
-        Step::Running => render_running(frame, inner[0], state),
     }
 
     let hint = match state.step {
         Step::Welcome => "ENTER: Start",
-        Step::ModelSelection => "↑/↓: Select | ENTER: Confirm | ESC: Back",
-        Step::QuantSelection => "↑/↓: Select | ENTER: Confirm | ESC: Back",
+        Step::ModelSelection => "↑/↓: Select Model | ENTER: Confirm | ESC: Back",
+        Step::QuantSelection => "↑/↓: Select Quant | ENTER: Confirm | ESC: Back",
         Step::ServerConfig => "↑/↓: Navigate | ENTER: Continue | ESC: Back",
         Step::Summary => "ENTER: Start Server | ESC: Back",
-        Step::Running => "Q/ESC: Stop",
     };
     frame.render_widget(Paragraph::new(hint).alignment(Alignment::Center), inner[1]);
 }
@@ -396,7 +377,7 @@ fn render_model_list(frame: &mut Frame, area: ratatui::layout::Rect, state: &Sta
             } else {
                 Style::default()
             };
-            ListItem::new(format!("{}{}", prefix, name)).style(style)
+            ListItem::new(format!("{prefix}{name}")).style(style)
         })
         .collect();
 
@@ -425,7 +406,7 @@ fn render_quant_list(frame: &mut Frame, area: ratatui::layout::Rect, state: &Sta
             } else {
                 Style::default()
             };
-            ListItem::new(format!("{}{}", prefix, name)).style(style)
+            ListItem::new(format!("{prefix}{name}")).style(style)
         })
         .collect();
 
@@ -513,25 +494,4 @@ fn render_summary(frame: &mut Frame, area: ratatui::layout::Rect, state: &State)
             .alignment(Alignment::Center),
         chunks[1],
     );
-}
-
-fn render_running(frame: &mut Frame, area: ratatui::layout::Rect, state: &State) {
-    let lines = vec![
-        Line::styled(
-            "Status: RUNNING",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::default(),
-        Line::styled(
-            format!("URL: http://{}:{}", state.app.host, state.app.port),
-            Style::default(),
-        ),
-        Line::default(),
-        Line::styled(format!("Model: {}", state.app.repo), Style::default()),
-        Line::styled(format!("Quant: {}", state.app.quant), Style::default()),
-    ];
-
-    frame.render_widget(Paragraph::new(lines), area);
 }
